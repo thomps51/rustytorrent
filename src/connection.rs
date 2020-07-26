@@ -4,6 +4,8 @@ use std::io::prelude::*;
 use std::net::TcpStream;
 use std::rc::Rc;
 
+use crate::block_manager::BlockManager;
+use crate::block_manager::CompletedPiece;
 use crate::message::*;
 use crate::tracker::PeerInfo;
 
@@ -15,11 +17,10 @@ pub struct Connection {
     pub peer_has: BitVec, // Which pieces the peer has
     pub stream: TcpStream,
     last_keep_alive: std::time::Instant,
-    pub piece_in_flight: PieceInFlight,
+    pub block_manager: BlockManager,
     pub pending_peer_requests: Vec<Request>,
     pub pending_peer_cancels: Vec<Cancel>,
     pub peer_info: PeerInfo,
-    piece_assigner: Rc<RefCell<crate::PieceAssigner>>,
 }
 
 impl Connection {
@@ -27,6 +28,7 @@ impl Connection {
         self.last_keep_alive = std::time::Instant::now();
     }
 
+    /*
     pub fn new(
         num_pieces: u32,
         peer_info: PeerInfo,
@@ -41,21 +43,21 @@ impl Connection {
             peer_has: BitVec::from_elem(num_pieces as usize, false),
             stream: TcpStream::connect(peer_info.addr)?,
             last_keep_alive: std::time::Instant::now(),
-            piece_in_flight: PieceInFlight::new(piece_length, first_piece),
+            block_manager: BlockManager::new(piece_assigner),
             pending_peer_requests: Vec::new(),
             pending_peer_cancels: Vec::new(),
             peer_info: peer_info.clone(),
-            piece_assigner: piece_assigner,
         })
     }
+    */
 
+    // constructor that takes a stream, used when you get connected to via a listen
     pub fn new_from_stream(
         num_pieces: u32,
         peer_id: &[u8],
         stream: TcpStream,
         piece_assigner: Rc<RefCell<crate::PieceAssigner>>,
     ) -> Connection {
-        let (first_piece, piece_length) = piece_assigner.borrow_mut().get();
         let addr = stream.peer_addr().unwrap();
         Self {
             am_choking: true,
@@ -65,14 +67,13 @@ impl Connection {
             peer_has: BitVec::from_elem(num_pieces as usize, false),
             stream: stream,
             last_keep_alive: std::time::Instant::now(),
-            piece_in_flight: PieceInFlight::new(piece_length, first_piece),
+            block_manager: BlockManager::new(piece_assigner),
             pending_peer_requests: Vec::new(),
             pending_peer_cancels: Vec::new(),
             peer_info: PeerInfo {
                 addr: addr,
                 id: peer_id.to_owned(),
             },
-            piece_assigner: piece_assigner,
         }
     }
 
@@ -103,11 +104,6 @@ impl Connection {
             match retval {
                 UpdateSuccess::NoUpdate => break,
                 UpdateSuccess::PieceComplete(piece) => {
-                    let mut piece_assigner = self.piece_assigner.borrow_mut();
-                    if piece_assigner.has_pieces() {
-                        let (index, size) = piece_assigner.get();
-                        self.piece_in_flight = PieceInFlight::new(size, index);
-                    }
                     have.set(piece.index as usize, true);
                     return Ok(UpdateSuccess::PieceComplete(piece));
                 }
@@ -117,19 +113,14 @@ impl Connection {
         // Cancel requested Requests (TODO)
         // Respond to Requests (TODO)
 
-        // Make a request if interested/choke conditions are met
+        // Make request(s) if interested/choke conditions are met
         if !self.peer_choking {
-            if let Some(value) = self.piece_in_flight.get_block_request() {
-                println!(
-                    "requesting block {} of {}",
-                    self.piece_in_flight.current_block, self.piece_in_flight.num_blocks
-                );
-                value.write_to(&mut self.stream)?;
+            if self.block_manager.can_send_block_requests() {
+                self.block_manager.send_block_requests(&mut self.stream)?;
+                return Ok(UpdateSuccess::Success);
             }
         }
-
         Ok(UpdateSuccess::NoUpdate)
-        //Ok(UpdateSuccess::Success)
     }
 
     pub fn read(&mut self) -> UpdateResult {
@@ -138,7 +129,6 @@ impl Connection {
             Ok(l) => l,
             Err(error) => {
                 if error.kind() == std::io::ErrorKind::WouldBlock {
-                    //println!("No messages to read from peer");
                     return Ok(UpdateSuccess::NoUpdate);
                 }
                 return Err(UpdateError::CommunicationError(error));
@@ -203,114 +193,5 @@ impl std::fmt::Display for UpdateError {
 impl From<std::io::Error> for UpdateError {
     fn from(error: std::io::Error) -> Self {
         UpdateError::CommunicationError(error)
-    }
-}
-
-#[derive(Debug)]
-pub struct CompletedPiece {
-    pub index: u32,
-    pub piece: Vec<u8>,
-}
-
-pub struct PieceInFlight {
-    index: u32,
-    piece: Vec<u8>,
-    have: BitVec,
-    last_block_length: u32,
-    num_blocks: u32,
-    current_block: u32,
-    block_requested: bool,
-}
-
-impl PieceInFlight {
-    const BLOCK_SIZE: u32 = 1 << 14; // 16 KiB
-
-    pub fn add_block(&mut self, block: &Block) -> Option<CompletedPiece> {
-        self.current_block += 1;
-        self.block_requested = false;
-        if block.index != self.index {
-            panic!("Error! Block is for a different piece!");
-        }
-        if block.begin % Self::BLOCK_SIZE != 0 {
-            panic!("Error! Begin is in between blocks!");
-        }
-        let block_index = block.begin / Self::BLOCK_SIZE;
-        if block_index >= self.num_blocks {
-            panic!("Error! Out of range");
-        }
-        let block_length = if block_index == self.num_blocks - 1 {
-            self.last_block_length
-        } else {
-            Self::BLOCK_SIZE
-        };
-        println!("Received block {} of {}", block_index + 1, self.num_blocks);
-        for i in 0..block_length {
-            let offset = block.begin + i;
-            self.piece[offset as usize] = block.block[i as usize];
-        }
-        self.have.set(block_index as usize, true);
-        if self.have.all() {
-            Some(CompletedPiece {
-                index: self.index,
-                piece: self.piece.clone(),
-            })
-        } else {
-            None
-        }
-    }
-
-    pub fn get_block_request(&mut self) -> Option<Request> {
-        if self.block_requested {
-            return None;
-        }
-        self.block_requested = true;
-        if self.current_block >= self.num_blocks {
-            return None;
-        }
-        let begin = self.current_block * Self::BLOCK_SIZE;
-        let length = if self.current_block == self.num_blocks - 1 {
-            self.last_block_length
-        } else {
-            Self::BLOCK_SIZE
-        };
-        Some(Request {
-            index: self.index,
-            begin,
-            length,
-        })
-    }
-
-    fn new(piece_size: u32, index: u32) -> PieceInFlight {
-        println!(
-            "PieceInFlight::new() with piece_size {} and index {}",
-            piece_size, index
-        );
-        let (last_block_length, num_blocks) = if piece_size % Self::BLOCK_SIZE == 0 {
-            (Self::BLOCK_SIZE, piece_size / Self::BLOCK_SIZE)
-        } else {
-            (
-                piece_size % Self::BLOCK_SIZE,
-                (piece_size / Self::BLOCK_SIZE) + 1,
-            )
-        };
-
-        let mut piece = Vec::new();
-        piece.resize(piece_size as usize, 0);
-        let have = BitVec::from_elem(num_blocks as usize, false);
-        println!(
-            "Current piece in flight has {} blocks of size {} for piece of size {}",
-            num_blocks,
-            Self::BLOCK_SIZE,
-            piece_size
-        );
-        PieceInFlight {
-            index,
-            piece,
-            have,
-            last_block_length,
-            num_blocks,
-            current_block: 0,
-            block_requested: false,
-        }
     }
 }

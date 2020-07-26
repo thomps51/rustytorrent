@@ -322,7 +322,7 @@ impl Message for Block {
     }
 
     fn update(self, connection: &mut Connection) -> UpdateResult {
-        match connection.piece_in_flight.add_block(&self) {
+        match connection.block_manager.add_block(&self) {
             Some(piece) => Ok(UpdateSuccess::PieceComplete(piece)),
             None => Ok(UpdateSuccess::Success),
         }

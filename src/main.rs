@@ -9,8 +9,11 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use memmap::MmapMut;
+//use mio::net::{TcpListener, TcpStream};
+//use mio::{Events, Interest, Poll, Token};
 
 mod bencoding;
+mod block_manager;
 mod connection;
 mod hash;
 mod message;
@@ -26,8 +29,10 @@ use tracker::EventKind;
 use tracker::Tracker;
 
 const LISTEN_PORT: u16 = 6881;
-const TEST_MODE: bool = false;
+const MAX_OPEN_REQUESTS_PER_PEER: usize = 5;
 const PEER_ID: &'static str = "-QQ00010000000000000";
+
+const TEST_MODE: bool = false;
 
 type PeerId = [u8; 20];
 
@@ -46,6 +51,7 @@ pub struct PieceAssigner {
 
 impl PieceAssigner {
    // index, size
+   // Needs to take into account which pieces that a peer has
    fn get(&mut self) -> (u32, u32) {
       let prev = self.counter;
       if prev >= self.total_pieces {
@@ -76,19 +82,10 @@ impl PieceAssigner {
    }
 }
 
-fn create_handshake(hashed_info: &hash::Sha1Hash, peer_id: &[u8]) -> Vec<u8> {
-   debug_assert!(peer_id.len() == 20);
-   let pstr = "BitTorrent protocol".as_bytes();
-   let mut result = Vec::new();
-   result.push(pstr.len() as u8);
-   result.extend_from_slice(pstr);
-   result.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 0]);
-   result.extend_from_slice(hashed_info);
-   result.extend_from_slice(peer_id);
-   debug_assert!(result.len() == 49 + pstr.len());
-
-   result
-}
+// Struct that represents a "sink" that writes pieces to file and has the current state of the
+// download
+// Maybe can have different "sinks", the main one writes to the file system but you can also
+// write to network drive, ftp (which would involve more caching in memory to avoid transit delays), etc.
 
 fn allocate_files(torrent: &Torrent) -> Result<AllocatedFiles, Box<dyn Error>> {
    let mut result = AllocatedFiles::new();
@@ -96,6 +93,7 @@ fn allocate_files(torrent: &Torrent) -> Result<AllocatedFiles, Box<dyn Error>> {
       let path = &file.path;
       // check if file exists
       // check if file is the correct size
+      // if it's the correct size, determine which pieces are valid and which need to still be downloaded
       let f = std::fs::OpenOptions::new()
          .read(true)
          .write(true)
@@ -141,11 +139,9 @@ fn handle_client(
    let mut have_pieces = bit_vec::BitVec::from_elem(num_pieces as usize, false);
    loop {
       let debug = peer.update(&mut have_pieces).unwrap();
-      //println!("Update result: {:?}", debug);
       match debug {
          UpdateSuccess::NoUpdate => std::thread::sleep(std::time::Duration::from_secs(1)),
          UpdateSuccess::PieceComplete(piece) => {
-            //println!("Piece: {:?}", piece.piece);
             let actual = hash::hash_to_bytes(&piece.piece);
             let expected = torrent.metainfo.pieces[piece.index as usize];
             println!(
@@ -154,7 +150,7 @@ fn handle_client(
                piece.piece.len(),
             );
             assert_eq!(actual, expected);
-
+            // Write piece to file
             let start = piece.index * piece_length;
             for i in 0..piece.piece.len() {
                let offset = start as usize + i;
@@ -166,6 +162,7 @@ fn handle_client(
          }
          UpdateSuccess::Success => continue,
       }
+      // TODO: wait until socket is readable if we are waiting for requests
       std::thread::sleep(std::time::Duration::from_millis(100));
       // If update completed a piece, add it to the file
    }
@@ -182,11 +179,12 @@ fn handle_client(
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-   //let torrent = Torrent::from_file(Path::new("DataPhilly_Creager_Thompson.key.torrent"))?;
-   let torrent = Torrent::from_file(Path::new("Capture0.png.torrent"))?;
+   let args: Vec<String> = std::env::args().collect();
+   // TODO validate args
+   println!("Torrent file: {}", args[1]);
+   let torrent = Torrent::from_file(Path::new(&args[1]))?;
    let tracker = Tracker {
-      //address: torrent.metainfo.announce.clone(),
-      address: "http://10.0.0.21:6969/announce".into(),
+      address: torrent.metainfo.announce.clone(),
    };
    //let files = allocate_files(&torrent)?;
    let response = tracker.announce(&torrent, EventKind::Started)?;
@@ -205,7 +203,6 @@ fn main() -> Result<(), Box<dyn Error>> {
 
    // Assume 1 seeding peer that you can successfully connect to.
 
-   let mut piece_index = 0;
    let mut current_peer_index = 0;
 
    let num_pieces = torrent.metainfo.pieces.len() as u32;
