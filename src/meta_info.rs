@@ -11,19 +11,19 @@ use bencoding::List;
 use hash::Sha1Hash;
 use hash::SHA1_HASH_LENGTH;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct File {
-    pub length: i64,
+    pub length: usize,
     pub path: PathBuf,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct MetaInfo {
     pub announce: String,
-    pub piece_length: i64,
+    pub piece_length: usize,
     pub pieces: Vec<Sha1Hash>,
     pub files: Vec<File>,
-    pub total_size: i64,
+    pub total_size: usize,
     pub info_hash_raw: Sha1Hash,
     pub info_hash_uri: String,
 }
@@ -44,7 +44,7 @@ impl MetaInfo {
     pub fn from_dict(dict: Dictionary) -> Result<MetaInfo, Box<dyn Error>> {
         let announce: String = get_as(&dict, "announce")?;
         let info: Dictionary = get_as(&dict, "info")?;
-        let piece_length: i64 = get_as(&info, "piece length")?;
+        let piece_length: usize = get_as(&info, "piece length")?;
         let raw_pieces: Vec<u8> = get_as(&info, "pieces")?;
         assert_eq!(raw_pieces.len() % SHA1_HASH_LENGTH, 0);
         let num_pieces = raw_pieces.len() / SHA1_HASH_LENGTH;

@@ -126,6 +126,22 @@ impl TryFrom<DataKind> for String {
    }
 }
 
+impl TryFrom<DataKind> for usize {
+   type Error = ConvertError;
+
+   fn try_from(value: DataKind) -> Result<usize, Self::Error> {
+      if let DataKind::Integer(v) = value {
+         if let Ok(us) = v.try_into() {
+            return Ok(us);
+         } else {
+            Err(ConvertError::new("DataKind is Integer, but negative"))
+         }
+      } else {
+         Err(ConvertError::new("DataKind is not Integer"))
+      }
+   }
+}
+
 macro_rules! ImplFrom {
    ($A:ident, $B:ident) => {
       impl From<$A> for DataKind {
@@ -146,5 +162,12 @@ ImplFrom!(Data, Data);
 impl From<String> for DataKind {
    fn from(value: String) -> Self {
       DataKind::Data(value.into_bytes())
+   }
+}
+
+// Indirect conversions
+impl From<usize> for DataKind {
+   fn from(value: usize) -> Self {
+      DataKind::Integer(value as i64)
    }
 }

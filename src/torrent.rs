@@ -4,9 +4,9 @@ use std::path::Path;
 
 pub struct Torrent {
     pub metainfo: MetaInfo,
-    pub downloaded: i64,
-    pub uploaded: i64,
-    pub left: i64,
+    pub downloaded: usize,
+    pub uploaded: usize,
+    pub left: usize,
 }
 
 impl Torrent {

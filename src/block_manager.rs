@@ -5,17 +5,18 @@ use std::rc::Rc;
 use bit_vec::BitVec;
 
 use crate::message::*;
+use crate::piece_assigner::PieceAssigner;
 use crate::MAX_OPEN_REQUESTS_PER_PEER;
 
 // Manages requests and receipts of blocks.
 pub struct BlockManager {
     blocks_in_flight: usize,
-    piece_assigner: Rc<RefCell<crate::PieceAssigner>>,
+    piece_assigner: Rc<RefCell<PieceAssigner>>,
     pieces_in_flight: Vec<PieceInFlight>,
 }
 
 impl BlockManager {
-    pub fn new(piece_assigner: Rc<RefCell<crate::PieceAssigner>>) -> Self {
+    pub fn new(piece_assigner: Rc<RefCell<PieceAssigner>>) -> Self {
         BlockManager {
             blocks_in_flight: 0,
             piece_assigner,
@@ -73,24 +74,23 @@ impl BlockManager {
 
 #[derive(Debug)]
 pub struct CompletedPiece {
-    pub index: u32,
+    pub index: usize,
     pub piece: Vec<u8>,
 }
 
 struct PieceInFlight {
-    index: u32,
+    index: usize,
     piece: Vec<u8>,
     have: BitVec,
-    last_block_length: u32,
-    num_blocks: u32,
-    current_block: u32,
-    blocks_in_flight: usize,
+    last_block_length: usize,
+    num_blocks: usize,
+    current_block: usize,
 }
 
 impl PieceInFlight {
-    const BLOCK_SIZE: u32 = 1 << 14; // 16 KiB
+    const BLOCK_SIZE: usize = 1 << 14; // 16 KiB
 
-    fn new(piece_size: u32, index: u32) -> PieceInFlight {
+    fn new(piece_size: usize, index: usize) -> PieceInFlight {
         let (last_block_length, num_blocks) = if piece_size % Self::BLOCK_SIZE == 0 {
             (Self::BLOCK_SIZE, piece_size / Self::BLOCK_SIZE)
         } else {
@@ -100,7 +100,7 @@ impl PieceInFlight {
             )
         };
         let mut piece = Vec::new();
-        piece.resize(piece_size as usize, 0);
+        piece.resize(piece_size, 0);
         let have = BitVec::from_elem(num_blocks as usize, false);
         PieceInFlight {
             index,
@@ -109,12 +109,10 @@ impl PieceInFlight {
             last_block_length,
             num_blocks,
             current_block: 0,
-            blocks_in_flight: 0,
         }
     }
 
     fn add_block(&mut self, block: &Block) -> Option<CompletedPiece> {
-        self.blocks_in_flight -= 1;
         if block.index != self.index {
             panic!("Error! Block is for a different piece!");
         }
@@ -150,10 +148,6 @@ impl PieceInFlight {
         if self.current_block >= self.num_blocks {
             return None;
         }
-        if self.blocks_in_flight > 5 {
-            return None;
-        }
-        self.blocks_in_flight += 1;
         let begin = self.current_block * Self::BLOCK_SIZE;
         let length = if self.current_block == self.num_blocks - 1 {
             self.last_block_length

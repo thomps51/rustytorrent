@@ -7,6 +7,8 @@ use std::rc::Rc;
 use crate::block_manager::BlockManager;
 use crate::block_manager::CompletedPiece;
 use crate::message::*;
+use crate::piece_assigner::PieceAssigner;
+use crate::piece_store::*;
 use crate::tracker::PeerInfo;
 
 pub struct Connection {
@@ -21,6 +23,7 @@ pub struct Connection {
     pub pending_peer_requests: Vec<Request>,
     pub pending_peer_cancels: Vec<Cancel>,
     pub peer_info: PeerInfo,
+    piece_store: Rc<RefCell<FileSystemPieceStore>>,
 }
 
 impl Connection {
@@ -53,10 +56,11 @@ impl Connection {
 
     // constructor that takes a stream, used when you get connected to via a listen
     pub fn new_from_stream(
-        num_pieces: u32,
+        num_pieces: usize,
         peer_id: &[u8],
         stream: TcpStream,
-        piece_assigner: Rc<RefCell<crate::PieceAssigner>>,
+        piece_assigner: Rc<RefCell<PieceAssigner>>,
+        piece_store: Rc<RefCell<FileSystemPieceStore>>,
     ) -> Connection {
         let addr = stream.peer_addr().unwrap();
         Self {
@@ -74,6 +78,7 @@ impl Connection {
                 addr: addr,
                 id: peer_id.to_owned(),
             },
+            piece_store,
         }
     }
 
@@ -94,7 +99,7 @@ impl Connection {
     //     - There was no update to do (no new messages)
     //     - Successfully did things, but no complete piece
     //     - Successfully downloaded a full piece
-    pub fn update(&mut self, have: &mut BitVec) -> UpdateResult {
+    pub fn update(&mut self) -> UpdateResult {
         // Read in a loop until one of the following conditions are met:
         //     - An error occurs
         //     - There are no new messages to read (NoUpdate)
@@ -104,8 +109,8 @@ impl Connection {
             match retval {
                 UpdateSuccess::NoUpdate => break,
                 UpdateSuccess::PieceComplete(piece) => {
-                    have.set(piece.index as usize, true);
-                    return Ok(UpdateSuccess::PieceComplete(piece));
+                    self.piece_store.borrow_mut().write(piece)?;
+                    return Ok(UpdateSuccess::Success);
                 }
                 UpdateSuccess::Success => continue,
             }

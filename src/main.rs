@@ -1,14 +1,11 @@
 // Goal: CLI that, when given a torrent file, will download it to completion
 
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::error::Error;
-use std::io::prelude::*;
+use std::net::{TcpListener, TcpStream};
 use std::path::Path;
-use std::path::PathBuf;
 use std::rc::Rc;
 
-use memmap::MmapMut;
 //use mio::net::{TcpListener, TcpStream};
 //use mio::{Events, Interest, Poll, Token};
 
@@ -18,106 +15,36 @@ mod connection;
 mod hash;
 mod message;
 mod meta_info;
+mod piece_assigner;
+mod piece_store;
 mod torrent;
 mod tracker;
 
 use connection::*;
 use message::*;
-use std::net::{TcpListener, TcpStream};
+use piece_assigner::PieceAssigner;
+use piece_store::*;
 use torrent::Torrent;
 use tracker::EventKind;
 use tracker::Tracker;
 
 const LISTEN_PORT: u16 = 6881;
-const MAX_OPEN_REQUESTS_PER_PEER: usize = 5;
+const MAX_OPEN_REQUESTS_PER_PEER: usize = 10;
 const PEER_ID: &'static str = "-QQ00010000000000000";
 
 const TEST_MODE: bool = false;
 
-type PeerId = [u8; 20];
-
-pub type AllocatedFiles = HashMap<PathBuf, MmapMut>;
-
-// simple, monotonic count for now, should be "random", and be able to response if a peer does
-// not have the piece that is assigned.
-
-// Needs to also give size, since last piece will have a different size
-pub struct PieceAssigner {
-   counter: u32,
-   total_pieces: u32,
-   total_size: u64,
-   piece_size: u32,
-}
-
-impl PieceAssigner {
-   // index, size
-   // Needs to take into account which pieces that a peer has
-   fn get(&mut self) -> (u32, u32) {
-      let prev = self.counter;
-      if prev >= self.total_pieces {
-         panic!("requested too many pieces!");
-      }
-      let size = if prev == self.total_pieces - 1 {
-         println!("Last piece: {}", prev);
-         (self.total_size % self.piece_size as u64) as u32
-      } else {
-         self.piece_size
-      };
-      println!("PieceAssigner piece {} of size {}", prev, size);
-      self.counter += 1;
-      (prev, size)
-   }
-
-   fn has_pieces(&self) -> bool {
-      self.counter != self.total_pieces
-   }
-
-   fn new(total_pieces: u32, total_size: u64, piece_size: u32) -> Self {
-      Self {
-         counter: 0,
-         total_pieces,
-         total_size,
-         piece_size,
-      }
-   }
-}
-
-// Struct that represents a "sink" that writes pieces to file and has the current state of the
-// download
-// Maybe can have different "sinks", the main one writes to the file system but you can also
-// write to network drive, ftp (which would involve more caching in memory to avoid transit delays), etc.
-
-fn allocate_files(torrent: &Torrent) -> Result<AllocatedFiles, Box<dyn Error>> {
-   let mut result = AllocatedFiles::new();
-   for file in &torrent.metainfo.files {
-      let path = &file.path;
-      // check if file exists
-      // check if file is the correct size
-      // if it's the correct size, determine which pieces are valid and which need to still be downloaded
-      let f = std::fs::OpenOptions::new()
-         .read(true)
-         .write(true)
-         .create(true)
-         .open(&path)?;
-      f.set_len(file.length as u64)?;
-      let mmap = unsafe { MmapMut::map_mut(&f)? };
-      result.insert(path.to_path_buf(), mmap);
-   }
-   Ok(result)
-}
-
-fn handle_client(
-   mut stream: TcpStream,
-   num_pieces: u32,
-   piece_length: u32,
-   torrent: &Torrent,
-   file_raw_bytes: &mut [u8],
-) {
+fn handle_client(mut stream: TcpStream, torrent: &Torrent) {
+   let num_pieces = torrent.metainfo.pieces.len();
+   let piece_length = torrent.metainfo.piece_length;
+   // These will be for each client
    let piece_assigner: Rc<RefCell<_>> = Rc::new(RefCell::new(PieceAssigner::new(
       num_pieces,
-      torrent.metainfo.total_size as u64,
+      torrent.metainfo.total_size,
       piece_length,
    )));
+   let piece_store: Rc<RefCell<_>> =
+      Rc::new(RefCell::new(FileSystemPieceStore::new(&torrent).unwrap()));
 
    let handshake_from_peer = message::Handshake::read_from(&mut stream).unwrap();
    println!("Received handshake: {:?}", handshake_from_peer);
@@ -126,6 +53,7 @@ fn handle_client(
       &handshake_from_peer.peer_id,
       stream,
       piece_assigner.clone(),
+      piece_store.clone(),
    );
    let handshake_to_peer = message::Handshake::new(PEER_ID, &torrent.metainfo.info_hash_raw);
    handshake_to_peer.write_to(&mut peer.stream).unwrap();
@@ -136,46 +64,31 @@ fn handle_client(
    let msg = message::Interested {};
    msg.write_to(&mut peer.stream).unwrap();
 
-   let mut have_pieces = bit_vec::BitVec::from_elem(num_pieces as usize, false);
    loop {
-      let debug = peer.update(&mut have_pieces).unwrap();
-      match debug {
-         UpdateSuccess::NoUpdate => std::thread::sleep(std::time::Duration::from_secs(1)),
-         UpdateSuccess::PieceComplete(piece) => {
-            let actual = hash::hash_to_bytes(&piece.piece);
-            let expected = torrent.metainfo.pieces[piece.index as usize];
-            println!(
-               "Piece {} with length {} complete!",
-               piece.index,
-               piece.piece.len(),
-            );
-            assert_eq!(actual, expected);
-            // Write piece to file
-            let start = piece.index * piece_length;
-            for i in 0..piece.piece.len() {
-               let offset = start as usize + i;
-               file_raw_bytes[offset] = piece.piece[i];
-            }
-            if have_pieces.all() {
-               break;
-            }
-         }
-         UpdateSuccess::Success => continue,
+      if let UpdateSuccess::NoUpdate = peer.update().unwrap() {
+         std::time::Duration::from_millis(10);
       }
-      // TODO: wait until socket is readable if we are waiting for requests
-      std::thread::sleep(std::time::Duration::from_millis(100));
-      // If update completed a piece, add it to the file
+      if piece_store.borrow_mut().have().all() {
+         break;
+      }
    }
-   // write file to disk;
-   let path = &torrent.metainfo.files[0].path;
-   let mut file = std::fs::OpenOptions::new()
-      .read(true)
-      .write(true)
-      .create(true)
-      .open(&path)
-      .unwrap();
-   println!("done! writing file to disk: {:?}", path);
-   file.write_all(file_raw_bytes).unwrap();
+
+   // validate file
+   let file_raw_bytes = std::fs::read(&torrent.metainfo.files[0].path).unwrap();
+   for i in 0..num_pieces {
+      let start = i * torrent.metainfo.piece_length;
+      let end = start
+         + if i != num_pieces - 1 {
+            torrent.metainfo.piece_length
+         } else {
+            torrent.metainfo.total_size % torrent.metainfo.piece_length
+         };
+      let actual = hash::hash_to_bytes(&file_raw_bytes[start..end]);
+      println!("File raw bytes: {:?}", &file_raw_bytes[start..end]);
+      let expected = torrent.metainfo.pieces[i];
+      println!("Validating piece {}", i);
+      assert_eq!(actual, expected);
+   }
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -190,29 +103,12 @@ fn main() -> Result<(), Box<dyn Error>> {
    let response = tracker.announce(&torrent, EventKind::Started)?;
    println!("tracker response: {:?}", response);
 
-   // Loop that does the following:
-   //    - if there are no Connections, start trying to connect to peers in the peer list from the tracker
-   //        - Remove Peer from peer list on success or failure
-   //        - Keep trying peers until there are X valid connections
-   //    - call update on all Connections (if any)
-   //        - Update will take a Memmapped file to write to and a Bitfield indicated which pieces we have
-   //        - If a piece was successfully downloaded, we need to generated a new piece number to download
-   //        - So each connection will be assigned a piece to download, if the peer has that piece
-   //    - if there are no updates, try to connect more peers. If no more peers in peer_list and Interval time has passed, re-announce.  Else sleep.
-   // Loop is done when all pieces are downloaded
-
-   // Assume 1 seeding peer that you can successfully connect to.
-
    let mut current_peer_index = 0;
 
-   let num_pieces = torrent.metainfo.pieces.len() as u32;
-   let piece_length = torrent.metainfo.piece_length as u32;
+   let num_pieces = torrent.metainfo.pieces.len();
+   let piece_length = torrent.metainfo.piece_length;
 
    let listener = TcpListener::bind(format!("10.0.0.2:{}", LISTEN_PORT).as_str())?;
-
-   // For now, just allocate file in RAM and flush to disk (this is not scalable to large torrents)
-   let mut file_raw_bytes = Vec::new();
-   file_raw_bytes.resize(torrent.metainfo.total_size as usize, 0 as u8);
 
    println!("Total file size: {}", torrent.metainfo.total_size);
    println!("Piece size: {}", torrent.metainfo.piece_length);
@@ -223,13 +119,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
    println!("Listening for connection on port {}", LISTEN_PORT);
    for stream in listener.incoming() {
-      handle_client(
-         stream?,
-         num_pieces,
-         piece_length,
-         &torrent,
-         &mut file_raw_bytes,
-      );
+      handle_client(stream?, &torrent);
       break; // only expect one for now
    }
 

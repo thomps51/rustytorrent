@@ -7,6 +7,8 @@ use std::io::Error;
 use std::io::Read;
 use std::io::Write;
 
+type PeerId = [u8; 20];
+
 // TODO genericize these fuction if possible
 fn read_u32<T: Read>(reader: &mut T) -> Result<u32, Error> {
     let mut buffer = [0; 4];
@@ -26,6 +28,10 @@ fn read_byte<T: Read>(reader: &mut T) -> Result<u8, std::io::Error> {
     Ok(buffer[0])
 }
 
+fn to_u32_be(value: usize) -> [u8; 4] {
+    (value as u32).to_be_bytes()
+}
+
 fn verify_pstr<T: Read>(reader: &mut T) {
     let size = read_byte(reader).unwrap();
     assert_eq!(size as usize, Handshake::PSTR.len());
@@ -37,7 +43,7 @@ fn verify_pstr<T: Read>(reader: &mut T) {
 #[derive(Debug, Clone, Default)]
 pub struct Handshake {
     pub info_hash: crate::hash::Sha1Hash,
-    pub peer_id: crate::PeerId,
+    pub peer_id: PeerId,
 }
 
 impl Handshake {
@@ -126,7 +132,7 @@ pub trait Message: Sized + std::fmt::Debug {
             }
         }
         let message = Self::read_data(reader, length)?;
-        println!("Read message of type: {}", Self::NAME);
+        //println!("Read message of type: {}", Self::NAME);
         Ok(message)
     }
 
@@ -139,7 +145,7 @@ pub trait Message: Sized + std::fmt::Debug {
 
     // Unlike ReadFrom, we don't know which particular message we have when we want
     fn write_to<T: Write>(&self, writer: &mut T) -> Result<(), Error> {
-        println!("Writing message: {:?}", self);
+        //println!("Writing message: {:?}", self);
         writer.write_all(&self.length_be_bytes())?;
         writer.write_all(&[Self::ID as u8])?;
         self.write_data(writer)?;
@@ -257,9 +263,9 @@ impl Message for Bitfield {
 
 #[derive(Debug, Clone)]
 pub struct Request {
-    pub index: u32,
-    pub begin: u32,
-    pub length: u32,
+    pub index: usize,
+    pub begin: usize,
+    pub length: usize,
 }
 
 impl Message for Request {
@@ -268,9 +274,9 @@ impl Message for Request {
     const NAME: &'static str = "Request";
 
     fn read_data<T: Read>(reader: &mut T, _: u32) -> Result<Self, Error> {
-        let index = read_u32(reader)?;
-        let begin = read_u32(reader)?;
-        let length = read_u32(reader)?;
+        let index = read_u32(reader)? as usize;
+        let begin = read_u32(reader)? as usize;
+        let length = read_u32(reader)? as usize;
         Ok(Request {
             index,
             begin,
@@ -284,17 +290,17 @@ impl Message for Request {
     }
 
     fn write_data<T: Write>(&self, writer: &mut T) -> Result<(), Error> {
-        writer.write_all(&self.index.to_be_bytes())?;
-        writer.write_all(&self.begin.to_be_bytes())?;
-        writer.write_all(&self.length.to_be_bytes())?;
+        writer.write_all(&to_u32_be(self.index))?;
+        writer.write_all(&to_u32_be(self.begin))?;
+        writer.write_all(&to_u32_be(self.length))?;
         Ok(())
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct Block {
-    pub index: u32,
-    pub begin: u32,
+    pub index: usize,
+    pub begin: usize,
     pub block: Vec<u8>,
 }
 
@@ -304,8 +310,8 @@ impl Message for Block {
     const NAME: &'static str = "Block";
 
     fn read_data<T: Read>(reader: &mut T, length: u32) -> Result<Self, Error> {
-        let index = read_u32(reader)?;
-        let begin = read_u32(reader)?;
+        let index = read_u32(reader)? as usize;
+        let begin = read_u32(reader)? as usize;
         let mut block = Vec::new();
         let size = length - 9; // id byte, 2 4-byte sizes
         block.resize(size as usize, 0);
@@ -329,8 +335,8 @@ impl Message for Block {
     }
 
     fn write_data<T: Write>(&self, writer: &mut T) -> Result<(), Error> {
-        writer.write_all(&self.index.to_be_bytes())?;
-        writer.write_all(&self.begin.to_be_bytes())?;
+        writer.write_all(&to_u32_be(self.index))?;
+        writer.write_all(&to_u32_be(self.begin))?;
         writer.write_all(&self.block)?;
         Ok(())
     }
