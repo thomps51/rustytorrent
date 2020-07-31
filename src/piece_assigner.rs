@@ -1,3 +1,5 @@
+use bit_vec::BitVec;
+
 // simple, monotonic count for now, should be "random", and be able to response if a peer does
 // not have the piece that is assigned.
 
@@ -21,7 +23,8 @@ impl PieceAssigner {
 
     // index, size
     // Needs to take into account which pieces that a peer has
-    pub fn get(&mut self) -> (usize, usize) {
+    // Needs to indicate if the set what the peer has and what we haven't downloaded are disjoint
+    pub fn get(&mut self, peer_has: &BitVec) -> (usize, usize) {
         let prev = self.counter;
         if prev >= self.total_pieces {
             panic!("requested too many pieces!");

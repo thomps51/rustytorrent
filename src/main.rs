@@ -13,7 +13,7 @@ mod bencoding;
 mod block_manager;
 mod connection;
 mod hash;
-mod message;
+mod messages;
 mod meta_info;
 mod piece_assigner;
 mod piece_store;
@@ -21,7 +21,7 @@ mod torrent;
 mod tracker;
 
 use connection::*;
-use message::*;
+use messages::*;
 use piece_assigner::PieceAssigner;
 use piece_store::*;
 use torrent::Torrent;
@@ -34,19 +34,54 @@ const PEER_ID: &'static str = "-QQ00010000000000000";
 
 const TEST_MODE: bool = false;
 
-fn handle_client(mut stream: TcpStream, torrent: &Torrent) {
-   let num_pieces = torrent.metainfo.pieces.len();
-   let piece_length = torrent.metainfo.piece_length;
-   // These will be for each client
-   let piece_assigner: Rc<RefCell<_>> = Rc::new(RefCell::new(PieceAssigner::new(
-      num_pieces,
-      torrent.metainfo.total_size,
-      piece_length,
-   )));
-   let piece_store: Rc<RefCell<_>> =
-      Rc::new(RefCell::new(FileSystemPieceStore::new(&torrent).unwrap()));
+type SharedPieceAssigner = Rc<RefCell<PieceAssigner>>;
+type SharedPieceStore = Rc<RefCell<FileSystemPieceStore>>; // impl Trait syntax pls
 
-   let handshake_from_peer = message::Handshake::read_from(&mut stream).unwrap();
+// validate files (since we are validating all pieces as they come in, this is mostly a sanity check)
+fn validate_all_files(torrent: &Torrent) {
+   let num_pieces = torrent.metainfo.pieces.len();
+   let mut file_iter = torrent.metainfo.files.iter();
+   let mut current_file =
+      std::fs::read(&file_iter.next().expect("Always at least one file").path).unwrap();
+   let mut current_file_index = 0;
+   for i in 0..num_pieces {
+      let mut current_piece = Vec::new();
+      let piece_length = if i != num_pieces - 1 {
+         torrent.metainfo.piece_length
+      } else {
+         torrent.metainfo.total_size % torrent.metainfo.piece_length
+      };
+      while current_piece.len() < piece_length {
+         let start = current_file_index;
+         let remaining = piece_length - current_piece.len();
+         let available_from_file = current_file.len() - current_file_index;
+         if available_from_file >= remaining {
+            let end = current_file_index + remaining;
+            current_piece.extend_from_slice(&current_file[start..end]);
+            current_file_index += remaining;
+         } else {
+            let end = current_file_index + available_from_file;
+            current_piece.extend_from_slice(&current_file[start..end]);
+            if let Some(file) = file_iter.next() {
+               current_file_index = 0;
+               current_file = std::fs::read(&file.path).unwrap();
+            }
+         }
+      }
+      let actual = hash::hash_to_bytes(&current_piece);
+      let expected = torrent.metainfo.pieces[i];
+      assert_eq!(actual, expected);
+   }
+}
+
+fn handle_client(
+   mut stream: TcpStream,
+   torrent: &Torrent,
+   piece_assigner: SharedPieceAssigner,
+   piece_store: SharedPieceStore,
+) {
+   let num_pieces = torrent.metainfo.pieces.len();
+   let handshake_from_peer = messages::Handshake::read_from(&mut stream).unwrap();
    println!("Received handshake: {:?}", handshake_from_peer);
    let mut peer = Connection::new_from_stream(
       num_pieces,
@@ -55,15 +90,12 @@ fn handle_client(mut stream: TcpStream, torrent: &Torrent) {
       piece_assigner.clone(),
       piece_store.clone(),
    );
-   let handshake_to_peer = message::Handshake::new(PEER_ID, &torrent.metainfo.info_hash_raw);
+   let handshake_to_peer = messages::Handshake::new(PEER_ID, &torrent.metainfo.info_hash_raw);
    handshake_to_peer.write_to(&mut peer.stream).unwrap();
-
-   let msg = message::Unchoke {};
+   let msg = Unchoke {};
    msg.write_to(&mut peer.stream).unwrap();
-
-   let msg = message::Interested {};
+   let msg = Interested {};
    msg.write_to(&mut peer.stream).unwrap();
-
    loop {
       if let UpdateSuccess::NoUpdate = peer.update().unwrap() {
          std::time::Duration::from_millis(10);
@@ -72,23 +104,7 @@ fn handle_client(mut stream: TcpStream, torrent: &Torrent) {
          break;
       }
    }
-
-   // validate file
-   let file_raw_bytes = std::fs::read(&torrent.metainfo.files[0].path).unwrap();
-   for i in 0..num_pieces {
-      let start = i * torrent.metainfo.piece_length;
-      let end = start
-         + if i != num_pieces - 1 {
-            torrent.metainfo.piece_length
-         } else {
-            torrent.metainfo.total_size % torrent.metainfo.piece_length
-         };
-      let actual = hash::hash_to_bytes(&file_raw_bytes[start..end]);
-      println!("File raw bytes: {:?}", &file_raw_bytes[start..end]);
-      let expected = torrent.metainfo.pieces[i];
-      println!("Validating piece {}", i);
-      assert_eq!(actual, expected);
-   }
+   validate_all_files(&torrent);
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -118,8 +134,20 @@ fn main() -> Result<(), Box<dyn Error>> {
    );
 
    println!("Listening for connection on port {}", LISTEN_PORT);
+   let piece_assigner = Rc::new(RefCell::new(PieceAssigner::new(
+      num_pieces,
+      torrent.metainfo.total_size,
+      piece_length,
+   )));
+   let piece_store: Rc<RefCell<_>> =
+      Rc::new(RefCell::new(FileSystemPieceStore::new(&torrent).unwrap()));
    for stream in listener.incoming() {
-      handle_client(stream?, &torrent);
+      handle_client(
+         stream?,
+         &torrent,
+         piece_assigner.clone(),
+         piece_store.clone(),
+      );
       break; // only expect one for now
    }
 

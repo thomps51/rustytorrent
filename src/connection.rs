@@ -1,15 +1,14 @@
 use bit_vec::BitVec;
-use std::cell::RefCell;
 use std::io::prelude::*;
 use std::net::TcpStream;
-use std::rc::Rc;
 
 use crate::block_manager::BlockManager;
 use crate::block_manager::CompletedPiece;
-use crate::message::*;
-use crate::piece_assigner::PieceAssigner;
+use crate::messages::*;
 use crate::piece_store::*;
 use crate::tracker::PeerInfo;
+use crate::SharedPieceAssigner;
+use crate::SharedPieceStore;
 
 pub struct Connection {
     am_choking: bool,
@@ -23,7 +22,7 @@ pub struct Connection {
     pub pending_peer_requests: Vec<Request>,
     pub pending_peer_cancels: Vec<Cancel>,
     pub peer_info: PeerInfo,
-    piece_store: Rc<RefCell<FileSystemPieceStore>>,
+    piece_store: SharedPieceStore,
 }
 
 impl Connection {
@@ -59,8 +58,8 @@ impl Connection {
         num_pieces: usize,
         peer_id: &[u8],
         stream: TcpStream,
-        piece_assigner: Rc<RefCell<PieceAssigner>>,
-        piece_store: Rc<RefCell<FileSystemPieceStore>>,
+        piece_assigner: SharedPieceAssigner,
+        piece_store: SharedPieceStore,
     ) -> Connection {
         let addr = stream.peer_addr().unwrap();
         Self {
@@ -121,7 +120,8 @@ impl Connection {
         // Make request(s) if interested/choke conditions are met
         if !self.peer_choking {
             if self.block_manager.can_send_block_requests() {
-                self.block_manager.send_block_requests(&mut self.stream)?;
+                self.block_manager
+                    .send_block_requests(&mut self.stream, &self.peer_has)?;
                 return Ok(UpdateSuccess::Success);
             }
         }
@@ -146,7 +146,7 @@ impl Connection {
         self.stream.set_nonblocking(false).unwrap();
         let id = self.read_byte()? as i8;
         println!("Received message with id: {}", id);
-        macro_rules! dispatch_message (
+        macro_rules! dispatch_message ( // This is really neat!
             ($($A:ident),*) => (
                 match id {
                     $($A::ID => {

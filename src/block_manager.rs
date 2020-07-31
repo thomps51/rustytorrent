@@ -1,22 +1,20 @@
-use std::cell::RefCell;
 use std::io::prelude::*;
-use std::rc::Rc;
 
 use bit_vec::BitVec;
 
-use crate::message::*;
-use crate::piece_assigner::PieceAssigner;
+use crate::messages::*;
+use crate::SharedPieceAssigner;
 use crate::MAX_OPEN_REQUESTS_PER_PEER;
 
 // Manages requests and receipts of blocks.
 pub struct BlockManager {
     blocks_in_flight: usize,
-    piece_assigner: Rc<RefCell<PieceAssigner>>,
+    piece_assigner: SharedPieceAssigner,
     pieces_in_flight: Vec<PieceInFlight>,
 }
 
 impl BlockManager {
-    pub fn new(piece_assigner: Rc<RefCell<PieceAssigner>>) -> Self {
+    pub fn new(piece_assigner: SharedPieceAssigner) -> Self {
         BlockManager {
             blocks_in_flight: 0,
             piece_assigner,
@@ -46,7 +44,11 @@ impl BlockManager {
         self.blocks_in_flight < MAX_OPEN_REQUESTS_PER_PEER
     }
 
-    pub fn send_block_requests<T: Write>(&mut self, stream: &mut T) -> Result<(), std::io::Error> {
+    pub fn send_block_requests<T: Write>(
+        &mut self,
+        stream: &mut T,
+        peer_has: &BitVec,
+    ) -> Result<(), std::io::Error> {
         while self.blocks_in_flight < MAX_OPEN_REQUESTS_PER_PEER {
             if let Some(last) = self.pieces_in_flight.last_mut() {
                 if let Some(value) = last.get_block_request() {
@@ -58,7 +60,7 @@ impl BlockManager {
             if !self.piece_assigner.borrow().has_pieces() {
                 return Ok(());
             }
-            let (piece_index, piece_length) = self.piece_assigner.borrow_mut().get();
+            let (piece_index, piece_length) = self.piece_assigner.borrow_mut().get(&peer_has);
             let mut piece_in_flight = PieceInFlight::new(piece_length, piece_index);
             if let Some(value) = piece_in_flight.get_block_request() {
                 value.write_to(stream)?;
