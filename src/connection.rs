@@ -1,6 +1,6 @@
 use bit_vec::BitVec;
+use mio::net::TcpStream;
 use std::io::prelude::*;
-use std::net::TcpStream;
 
 use crate::block_manager::BlockManager;
 use crate::block_manager::CompletedPiece;
@@ -23,6 +23,14 @@ pub struct Connection {
     pub pending_peer_cancels: Vec<Cancel>,
     pub peer_info: PeerInfo,
     piece_store: SharedPieceStore,
+    read_some: Option<usize>,
+    read_buffer: Vec<u8>,
+}
+
+fn read_byte_from<T: Read>(stream: &mut T) -> Result<u8, std::io::Error> {
+    let mut buffer = [0; 1];
+    stream.read_exact(&mut buffer)?;
+    Ok(buffer[0])
 }
 
 impl Connection {
@@ -78,13 +86,9 @@ impl Connection {
                 id: peer_id.to_owned(),
             },
             piece_store,
+            read_some: None,
+            read_buffer: Vec::new(),
         }
-    }
-
-    fn read_byte(&mut self) -> Result<u8, std::io::Error> {
-        let mut buffer = [0; 1];
-        self.stream.read_exact(&mut buffer)?;
-        Ok(buffer[0])
     }
 
     fn read_u32(&mut self) -> Result<u32, std::io::Error> {
@@ -117,7 +121,6 @@ impl Connection {
         // Cancel requested Requests (TODO)
         // Respond to Requests (TODO)
 
-        // Make request(s) if interested/choke conditions are met
         if !self.peer_choking {
             if self.block_manager.can_send_block_requests() {
                 self.block_manager
@@ -129,35 +132,77 @@ impl Connection {
     }
 
     pub fn read(&mut self) -> UpdateResult {
-        self.stream.set_nonblocking(true).unwrap();
-        let length = match self.read_u32() {
-            Ok(l) => l,
-            Err(error) => {
-                if error.kind() == std::io::ErrorKind::WouldBlock {
-                    return Ok(UpdateSuccess::NoUpdate);
+        let length = if let Some(v) = self.read_some {
+            v
+        } else {
+            match self.read_u32() {
+                Ok(l) => l as usize,
+                Err(error) => {
+                    if error.kind() == std::io::ErrorKind::WouldBlock {
+                        return Ok(UpdateSuccess::NoUpdate);
+                    }
+                    return Err(UpdateError::CommunicationError(error));
                 }
-                return Err(UpdateError::CommunicationError(error));
             }
         };
+        self.read_some = Some(length);
         if length == 0 {
             let msg = KeepAlive {};
+            self.read_some = None;
             return msg.update(self);
         }
-        self.stream.set_nonblocking(false).unwrap();
-        let id = self.read_byte()? as i8;
-        println!("Received message with id: {}", id);
+        if self.read_buffer.len() == 0 {
+            // None has been read so far
+            self.read_buffer.resize(length, 0);
+            let read = match self.stream.read(&mut self.read_buffer) {
+                Ok(l) => l as usize,
+                Err(error) => {
+                    if error.kind() == std::io::ErrorKind::WouldBlock {
+                        self.read_buffer.resize(0, 0);
+                        return Ok(UpdateSuccess::NoUpdate);
+                    }
+                    return Err(UpdateError::CommunicationError(error));
+                }
+            };
+            if read < length {
+                // didn't read all
+                self.read_buffer.resize(read, 0);
+                return Ok(UpdateSuccess::NoUpdate);
+            }
+        } else {
+            let prev_length = self.read_buffer.len();
+            let need_to_read = length - prev_length;
+            self.read_buffer.resize(length, 0);
+            let read = match self.stream.read(&mut self.read_buffer[prev_length..]) {
+                Ok(l) => l as usize,
+                Err(error) => {
+                    if error.kind() == std::io::ErrorKind::WouldBlock {
+                        self.read_buffer.resize(prev_length, 0);
+                        return Ok(UpdateSuccess::NoUpdate);
+                    }
+                    return Err(UpdateError::CommunicationError(error));
+                }
+            };
+            if read < need_to_read {
+                self.read_buffer.resize(prev_length + read, 0);
+                return Ok(UpdateSuccess::NoUpdate);
+            }
+        }
+        // if we get to here, buffer is filled
+        let id = read_byte_from(&mut (&self.read_buffer[..]))? as i8;
+        //println!("Received message with id: {}", id);
         macro_rules! dispatch_message ( // This is really neat!
             ($($A:ident),*) => (
                 match id {
                     $($A::ID => {
-                        let msg = $A::read_from(&mut self.stream, length)?;
+                        let msg = $A::read_from(&mut (&self.read_buffer[1..]), length)?;
                         msg.update(self)
                     })*
                     _ => Err(UpdateError::UnknownMessage{id}),
                 }
             );
         );
-        return dispatch_message!(
+        let retval = dispatch_message!(
             Choke,
             Unchoke,
             Interested,
@@ -168,6 +213,9 @@ impl Connection {
             Block,
             Cancel
         );
+        self.read_buffer.resize(0, 0);
+        self.read_some = None;
+        retval
     }
 }
 

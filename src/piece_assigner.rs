@@ -24,18 +24,18 @@ impl PieceAssigner {
     // index, size
     // Needs to take into account which pieces that a peer has
     // Needs to indicate if the set what the peer has and what we haven't downloaded are disjoint
-    pub fn get(&mut self, peer_has: &BitVec) -> (usize, usize) {
+    pub fn get(&mut self, _: &BitVec) -> (usize, usize) {
         let prev = self.counter;
         if prev >= self.total_pieces {
             panic!("requested too many pieces!");
         }
         let size = if prev == self.total_pieces - 1 {
-            println!("Last piece: {}", prev);
+            //println!("Last piece: {}", prev);
             self.total_size % self.piece_size
         } else {
             self.piece_size
         };
-        println!("PieceAssigner piece {} of size {}", prev, size);
+        //println!("PieceAssigner piece {} of size {}", prev, size);
         self.counter += 1;
         (prev, size)
     }

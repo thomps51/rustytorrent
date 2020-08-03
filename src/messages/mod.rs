@@ -46,7 +46,7 @@ macro_rules! ImplSingleByteMessage {
                 Ok(UpdateSuccess::Success)
             }
 
-            fn read_data<T: Read>(_: &mut T, _: u32) -> Result<Self, Error> {
+            fn read_data<T: Read>(_: &mut T, _: usize) -> Result<Self, Error> {
                 Ok($NAME {})
             }
         }
@@ -67,7 +67,7 @@ impl Message for Port {
     const SIZE: MessageLength = MessageLength::Fixed(3);
     const NAME: &'static str = "Port";
 
-    fn read_data<T: Read>(reader: &mut T, _: u32) -> Result<Self, Error> {
+    fn read_data<T: Read>(reader: &mut T, _: usize) -> Result<Self, Error> {
         let listen_port = read_u16(reader)?;
         Ok(Port { listen_port })
     }

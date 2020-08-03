@@ -130,7 +130,7 @@ impl PieceInFlight {
         } else {
             Self::BLOCK_SIZE
         };
-        println!("Received block {} of {}", block_index + 1, self.num_blocks);
+        //println!("Received block {} of {}", block_index + 1, self.num_blocks);
         for i in 0..block_length {
             let offset = block.begin + i;
             self.piece[offset as usize] = block.block[i as usize];

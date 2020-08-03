@@ -16,7 +16,7 @@ impl Message for KeepAlive {
     const SIZE: MessageLength = MessageLength::Fixed(0);
     const NAME: &'static str = "KeepAlive";
 
-    fn read_data<T: Read>(_: &mut T, _: u32) -> Result<Self, Error> {
+    fn read_data<T: Read>(_: &mut T, _: usize) -> Result<Self, Error> {
         Ok(KeepAlive {})
     }
 

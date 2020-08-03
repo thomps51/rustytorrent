@@ -20,7 +20,7 @@ impl Message for Have {
     const SIZE: MessageLength = MessageLength::Fixed(5);
     const NAME: &'static str = "Have";
 
-    fn read_data<T: Read>(reader: &mut T, _: u32) -> Result<Self, Error> {
+    fn read_data<T: Read>(reader: &mut T, _: usize) -> Result<Self, Error> {
         let index = read_u32(reader)?;
         Ok(Have { index })
     }

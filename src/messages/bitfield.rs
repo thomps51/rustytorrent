@@ -20,7 +20,11 @@ impl Message for Bitfield {
     const SIZE: MessageLength = MessageLength::Variable;
     const NAME: &'static str = "Bitfield";
 
-    fn read_data<T: Read>(reader: &mut T, length: u32) -> Result<Self, Error> {
+    fn length(&self) -> usize {
+        1 + self.bitfield.len()
+    }
+
+    fn read_data<T: Read>(reader: &mut T, length: usize) -> Result<Self, Error> {
         let mut buffer = Vec::new();
         let size = length - 1; // Subtract the ID byte
         buffer.resize(size as usize, 0);

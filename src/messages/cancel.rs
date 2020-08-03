@@ -21,7 +21,7 @@ impl Message for Cancel {
     const SIZE: MessageLength = MessageLength::Fixed(13);
     const NAME: &'static str = "Cancel";
 
-    fn read_data<T: Read>(reader: &mut T, _: u32) -> Result<Self, Error> {
+    fn read_data<T: Read>(reader: &mut T, _: usize) -> Result<Self, Error> {
         let index = read_u32(reader)?;
         let begin = read_u32(reader)?;
         let length = read_u32(reader)?;

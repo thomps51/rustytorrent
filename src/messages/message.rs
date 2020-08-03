@@ -5,7 +5,7 @@ use std::io::Read;
 use std::io::Write;
 
 pub enum MessageLength {
-    Fixed(u32),
+    Fixed(usize),
     Variable,
 }
 
@@ -16,7 +16,7 @@ pub trait Message: Sized + std::fmt::Debug {
     const SIZE: MessageLength;
     const NAME: &'static str;
 
-    fn length(&self) -> u32 {
+    fn length(&self) -> usize {
         if let MessageLength::Fixed(length) = Self::SIZE {
             length
         } else {
@@ -25,14 +25,14 @@ pub trait Message: Sized + std::fmt::Debug {
     }
 
     fn length_be_bytes(&self) -> [u8; 4] {
-        return self.length().to_be_bytes();
+        return (self.length() as u32).to_be_bytes();
     }
 
     // When reading the message, we already know what we will be reading thanks to the id.  Therefore,
     // implementations should not read the id in ReadFrom.
-    fn read_data<T: Read>(reader: &mut T, length: u32) -> Result<Self, Error>;
+    fn read_data<T: Read>(reader: &mut T, length: usize) -> Result<Self, Error>;
 
-    fn read_from<T: Read>(reader: &mut T, length: u32) -> Result<Self, Error> {
+    fn read_from<T: Read>(reader: &mut T, length: usize) -> Result<Self, Error> {
         if let MessageLength::Fixed(expected) = Self::SIZE {
             if expected != length {
                 panic!("Fixed-sized message received with wrong size");

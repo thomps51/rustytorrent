@@ -2,10 +2,6 @@ use std::io::Error;
 use std::io::Read;
 use std::io::Write;
 
-use super::super::Connection;
-use super::super::UpdateResult;
-use super::super::UpdateSuccess;
-
 type PeerId = [u8; 20];
 
 #[derive(Debug, Clone, Default)]
@@ -15,8 +11,8 @@ pub struct Handshake {
 }
 
 impl Handshake {
-    const PSTR: &'static [u8] = "BitTorrent protocol".as_bytes();
-    const SIZE: u8 = 49 + Self::PSTR.len() as u8;
+    pub const PSTR: &'static [u8] = "BitTorrent protocol".as_bytes();
+    pub const SIZE: u8 = 49 + Self::PSTR.len() as u8;
 
     pub fn new(peer_id: &str, info_hash: &crate::hash::Sha1Hash) -> Self {
         let mut result: Self = Default::default();
@@ -42,17 +38,6 @@ impl Handshake {
         writer.write_all(&[0, 0, 0, 0, 0, 0, 0, 0])?;
         writer.write_all(&self.info_hash)?;
         writer.write_all(&self.peer_id)?;
-        /*
-        let mut buffer = Vec::new();
-        buffer.push(Self::PSTR.len() as u8);
-        buffer.extend_from_slice(Self::PSTR);
-        buffer.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 0]);
-        buffer.extend_from_slice(&self.info_hash);
-        buffer.extend_from_slice(&self.peer_id);
-        debug_assert_eq!(buffer.len() as u8, Self::SIZE);
-        println!("Sending handshake {:?}", buffer);
-        writer.write_all(&buffer)?;
-        */
         Ok(())
     }
 }

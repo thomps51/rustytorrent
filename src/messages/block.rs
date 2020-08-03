@@ -22,17 +22,23 @@ impl Message for Block {
     const SIZE: MessageLength = MessageLength::Variable;
     const NAME: &'static str = "Block";
 
-    fn read_data<T: Read>(reader: &mut T, length: u32) -> Result<Self, Error> {
+    fn length(&self) -> usize {
+        9 + self.block.len()
+    }
+
+    fn read_data<T: Read>(reader: &mut T, length: usize) -> Result<Self, Error> {
         let index = read_u32(reader)? as usize;
         let begin = read_u32(reader)? as usize;
         let mut block = Vec::new();
         let size = length - 9; // id byte, 2 4-byte sizes
         block.resize(size as usize, 0);
         reader.read_exact(&mut block)?;
+        /*
         println!(
             "Received block for index {} at offset {} with size {}",
             index, begin, size
         );
+        */
         Ok(Block {
             index,
             begin,
