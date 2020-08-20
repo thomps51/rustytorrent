@@ -53,7 +53,7 @@ impl Tracker {
     ) -> Result<TrackerResponse, Box<dyn Error>> {
         debug_assert_eq!(crate::PEER_ID.len(), 20);
         let encoded = format!(
-            "info_hash={}&peer_id={}&port={}&uploaded={}&downloaded={}&left={}&event={}",
+            "info_hash={}&peer_id={}&port={}&uploaded={}&downloaded={}&left={}&event={}&compact=0",
             torrent.metainfo.info_hash_uri,
             crate::PEER_ID,
             crate::LISTEN_PORT.to_string(),

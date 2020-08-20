@@ -1,74 +1,75 @@
 use std::io::prelude::*;
 
 use bit_vec::BitVec;
+use log::debug;
 
 use crate::messages::*;
+use crate::piece_store::PieceStore;
 use crate::SharedPieceAssigner;
+use crate::SharedPieceStore;
 use crate::MAX_OPEN_REQUESTS_PER_PEER;
 
 // Manages requests and receipts of blocks.
 pub struct BlockManager {
     blocks_in_flight: usize,
     piece_assigner: SharedPieceAssigner,
-    pieces_in_flight: Vec<PieceInFlight>,
+    piece_store: SharedPieceStore,
+    piece_in_flight: Option<PieceInFlight>,
 }
 
 impl BlockManager {
-    pub fn new(piece_assigner: SharedPieceAssigner) -> Self {
+    pub fn new(piece_assigner: SharedPieceAssigner, piece_store: SharedPieceStore) -> Self {
         BlockManager {
             blocks_in_flight: 0,
             piece_assigner,
-            pieces_in_flight: Vec::new(),
+            piece_store,
+            piece_in_flight: None,
         }
     }
-    pub fn add_block(&mut self, block: &Block) -> Option<CompletedPiece> {
+    pub fn add_block(&mut self, block: Block) {
         self.blocks_in_flight -= 1;
-        if let Some(index) = self
-            .pieces_in_flight
-            .iter()
-            .position(|x| x.index == block.index)
-        {
-            let piece = &mut self.pieces_in_flight[index];
-            if let Some(p) = piece.add_block(block) {
-                self.pieces_in_flight.remove(index);
-                Some(p)
-            } else {
-                None
-            }
-        } else {
-            panic!("Got block for piece that wasn't requested");
-        }
+        self.piece_store.borrow_mut().write_block(block).unwrap();
     }
 
     pub fn can_send_block_requests(&self) -> bool {
         self.blocks_in_flight < MAX_OPEN_REQUESTS_PER_PEER
     }
 
+    pub fn num_blocks_to_request(&self) -> usize {
+        MAX_OPEN_REQUESTS_PER_PEER - self.blocks_in_flight
+    }
+
     pub fn send_block_requests<T: Write>(
         &mut self,
         stream: &mut T,
         peer_has: &BitVec,
+        id: usize,
     ) -> Result<(), std::io::Error> {
         while self.blocks_in_flight < MAX_OPEN_REQUESTS_PER_PEER {
-            if let Some(last) = self.pieces_in_flight.last_mut() {
-                if let Some(value) = last.get_block_request() {
+            if let Some(current) = &mut self.piece_in_flight {
+                if let Some(value) = current.get_block_request() {
+                    debug!("sending block request: {:?}", value);
                     value.write_to(stream)?;
                     self.blocks_in_flight += 1;
                     continue;
+                } else {
+                    self.piece_in_flight = None;
                 }
             }
-            if !self.piece_assigner.borrow().has_pieces() {
-                return Ok(());
-            }
-            let (piece_index, piece_length) = self.piece_assigner.borrow_mut().get(&peer_has);
-            let mut piece_in_flight = PieceInFlight::new(piece_length, piece_index);
-            if let Some(value) = piece_in_flight.get_block_request() {
-                value.write_to(stream)?;
+            if let Some((piece_index, piece_length)) = self.piece_assigner.borrow_mut().get(
+                &peer_has,
+                || self.piece_store.borrow().have(),
+                id,
+            ) {
+                let mut piece_in_flight = PieceInFlight::new(piece_length, piece_index);
+                let msg = piece_in_flight.get_block_request().unwrap();
+                debug!("sending block request: {:?}", msg);
+                msg.write_to(stream)?;
+                self.blocks_in_flight += 1;
+                self.piece_in_flight = Some(piece_in_flight);
             } else {
-                panic!("new piece didn't have any blocks");
+                break;
             }
-            self.pieces_in_flight.push(piece_in_flight);
-            self.blocks_in_flight += 1;
         }
         Ok(())
     }
@@ -80,7 +81,7 @@ pub struct CompletedPiece {
     pub piece: Vec<u8>,
 }
 
-struct PieceInFlight {
+pub struct PieceInFlight {
     index: usize,
     piece: Vec<u8>,
     have: BitVec,
@@ -92,7 +93,7 @@ struct PieceInFlight {
 impl PieceInFlight {
     const BLOCK_SIZE: usize = 1 << 14; // 16 KiB
 
-    fn new(piece_size: usize, index: usize) -> PieceInFlight {
+    pub fn new(piece_size: usize, index: usize) -> PieceInFlight {
         let (last_block_length, num_blocks) = if piece_size % Self::BLOCK_SIZE == 0 {
             (Self::BLOCK_SIZE, piece_size / Self::BLOCK_SIZE)
         } else {
@@ -114,7 +115,7 @@ impl PieceInFlight {
         }
     }
 
-    fn add_block(&mut self, block: &Block) -> Option<CompletedPiece> {
+    pub fn add_block(&mut self, block: &Block) -> Option<CompletedPiece> {
         if block.index != self.index {
             panic!("Error! Block is for a different piece!");
         }
@@ -130,13 +131,14 @@ impl PieceInFlight {
         } else {
             Self::BLOCK_SIZE
         };
-        //println!("Received block {} of {}", block_index + 1, self.num_blocks);
+        debug!("Received block {} of {}", block_index + 1, self.num_blocks);
         for i in 0..block_length {
             let offset = block.begin + i;
-            self.piece[offset as usize] = block.block[i as usize];
+            self.piece[offset] = block.block[i];
         }
-        self.have.set(block_index as usize, true);
+        self.have.set(block_index, true);
         if self.have.all() {
+            debug!("Got piece {}", self.index);
             Some(CompletedPiece {
                 index: self.index,
                 piece: self.piece.clone(),
@@ -146,7 +148,7 @@ impl PieceInFlight {
         }
     }
 
-    fn get_block_request(&mut self) -> Option<Request> {
+    pub fn get_block_request(&mut self) -> Option<Request> {
         if self.current_block >= self.num_blocks {
             return None;
         }

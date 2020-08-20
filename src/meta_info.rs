@@ -31,14 +31,8 @@ pub struct MetaInfo {
 impl MetaInfo {
     // Create MetaInfo from a file which has a bencoded dictionary (torrent file).
     pub fn from_file(file: &Path) -> Result<MetaInfo, Box<dyn Error>> {
-        let file = std::fs::File::open(file)?;
-        let mmap = unsafe { memmap::MmapOptions::new().map(&file)? };
-        let result = bencoding::parse(&mmap).unwrap();
-        if let bencoding::DataKind::Dictionary(value) = result {
-            Ok(Self::from_dict(value)?)
-        } else {
-            Err(String::from("File needs to be a bencoded dictionary").into())
-        }
+        let dict = bencoding::parse_into_dictionary(file)?;
+        Ok(Self::from_dict(dict)?)
     }
 
     pub fn from_dict(dict: Dictionary) -> Result<MetaInfo, Box<dyn Error>> {

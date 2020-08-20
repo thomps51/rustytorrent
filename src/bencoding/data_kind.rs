@@ -13,7 +13,6 @@ pub enum DataKind {
 
 pub type Data = Vec<u8>;
 pub type Dictionary = BTreeMap<String, DataKind>;
-//pub type Dictionary = HashMap<String, DataKind>;
 pub type List = Vec<DataKind>;
 
 impl DataKind {

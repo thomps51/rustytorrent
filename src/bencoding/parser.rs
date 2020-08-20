@@ -1,9 +1,10 @@
+use std::io::prelude::*;
+use std::path::Path;
+
 use super::data_kind;
 
 use data_kind::DataKind;
 use data_kind::Dictionary;
-use memmap::MmapOptions;
-use std::path::Path;
 
 pub struct Parser<'a> {
     current_index: usize,
@@ -170,9 +171,10 @@ pub fn parse(data: &[u8]) -> Result<DataKind, ParseError> {
 pub fn parse_into_dictionary(
     torrent_file: &Path,
 ) -> Result<Dictionary, Box<dyn std::error::Error>> {
-    let file = std::fs::File::open(torrent_file)?;
-    let mmap = unsafe { MmapOptions::new().map(&file)? };
-    let result = parse(&mmap).unwrap();
+    let mut file = std::fs::File::open(torrent_file)?;
+    let mut buffer = Vec::new();
+    file.read_to_end(&mut buffer)?;
+    let result = parse(&buffer).unwrap();
     if let DataKind::Dictionary(value) = result {
         Ok(value)
     } else {

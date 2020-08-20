@@ -1,12 +1,24 @@
-use super::super::Connection;
-use super::super::UpdateResult;
 use std::io::Error;
 use std::io::Read;
 use std::io::Write;
 
+use log::{debug, info, warn};
+
+use super::super::Connection;
+use super::super::UpdateResult;
+
 pub enum MessageLength {
     Fixed(usize),
     Variable,
+}
+
+impl From<MessageLength> for usize {
+    fn from(length: MessageLength) -> Self {
+        match length {
+            MessageLength::Fixed(value) => value,
+            MessageLength::Variable => panic!(""),
+        }
+    }
 }
 
 // Default case will handle fixed length messages with no associated data, others will
@@ -39,7 +51,7 @@ pub trait Message: Sized + std::fmt::Debug {
             }
         }
         let message = Self::read_data(reader, length)?;
-        //println!("Read message of type: {}", Self::NAME);
+        debug!("Read message of type: {}", Self::NAME);
         Ok(message)
     }
 
@@ -52,7 +64,7 @@ pub trait Message: Sized + std::fmt::Debug {
 
     // Unlike ReadFrom, we don't know which particular message we have when we want
     fn write_to<T: Write>(&self, writer: &mut T) -> Result<(), Error> {
-        //println!("Writing message: {:?}", self);
+        debug!("Writing message of type: {}", Self::NAME);
         writer.write_all(&self.length_be_bytes())?;
         writer.write_all(&[Self::ID as u8])?;
         self.write_data(writer)?;

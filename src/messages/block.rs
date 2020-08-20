@@ -33,12 +33,6 @@ impl Message for Block {
         let size = length - 9; // id byte, 2 4-byte sizes
         block.resize(size as usize, 0);
         reader.read_exact(&mut block)?;
-        /*
-        println!(
-            "Received block for index {} at offset {} with size {}",
-            index, begin, size
-        );
-        */
         Ok(Block {
             index,
             begin,
@@ -47,10 +41,8 @@ impl Message for Block {
     }
 
     fn update(self, connection: &mut Connection) -> UpdateResult {
-        match connection.block_manager.add_block(&self) {
-            Some(piece) => Ok(UpdateSuccess::PieceComplete(piece)),
-            None => Ok(UpdateSuccess::Success),
-        }
+        connection.block_manager.add_block(self);
+        Ok(UpdateSuccess::Success)
     }
 
     fn write_data<T: Write>(&self, writer: &mut T) -> Result<(), Error> {

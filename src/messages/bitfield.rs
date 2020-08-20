@@ -3,6 +3,7 @@ use std::io::Read;
 use std::io::Write;
 
 use bit_vec::BitVec;
+use log::debug;
 
 use super::super::Connection;
 use super::super::UpdateResult;
@@ -10,9 +11,11 @@ use super::super::UpdateSuccess;
 use super::Message;
 use super::MessageLength;
 
+use crate::PieceStore;
+
 #[derive(Debug, Clone)]
 pub struct Bitfield {
-    bitfield: BitVec,
+    pub bitfield: BitVec,
 }
 
 impl Message for Bitfield {
@@ -35,7 +38,9 @@ impl Message for Bitfield {
     }
 
     fn update(self, connection: &mut Connection) -> UpdateResult {
+        // Received bitfield was padded with extra bits, so we need to truncate it
         connection.peer_has = self.bitfield;
+        connection.peer_has.truncate(connection.num_pieces);
         Ok(UpdateSuccess::Success)
     }
 

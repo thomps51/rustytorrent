@@ -13,6 +13,8 @@ use crate::SharedPieceStore;
 pub struct Connection {
     am_choking: bool,
     am_interested: bool,
+    id: usize,
+    total_read: usize,
     pub peer_choking: bool,
     pub peer_interested: bool,
     pub peer_has: BitVec, // Which pieces the peer has
@@ -22,9 +24,9 @@ pub struct Connection {
     pub pending_peer_requests: Vec<Request>,
     pub pending_peer_cancels: Vec<Cancel>,
     pub peer_info: PeerInfo,
-    piece_store: SharedPieceStore,
     read_some: Option<usize>,
     read_buffer: Vec<u8>,
+    pub num_pieces: usize,
 }
 
 fn read_byte_from<T: Read>(stream: &mut T) -> Result<u8, std::io::Error> {
@@ -38,56 +40,36 @@ impl Connection {
         self.last_keep_alive = std::time::Instant::now();
     }
 
-    /*
-    pub fn new(
-        num_pieces: u32,
-        peer_info: PeerInfo,
-        piece_assigner: Rc<RefCell<crate::PieceAssigner>>,
-    ) -> Result<Connection, std::io::Error> {
-        let (first_piece, piece_length) = piece_assigner.borrow_mut().get();
-        Ok(Self {
-            am_choking: true,
-            am_interested: false,
-            peer_choking: true,
-            peer_interested: false,
-            peer_has: BitVec::from_elem(num_pieces as usize, false),
-            stream: TcpStream::connect(peer_info.addr)?,
-            last_keep_alive: std::time::Instant::now(),
-            block_manager: BlockManager::new(piece_assigner),
-            pending_peer_requests: Vec::new(),
-            pending_peer_cancels: Vec::new(),
-            peer_info: peer_info.clone(),
-        })
-    }
-    */
-
-    // constructor that takes a stream, used when you get connected to via a listen
     pub fn new_from_stream(
         num_pieces: usize,
         peer_id: &[u8],
         stream: TcpStream,
         piece_assigner: SharedPieceAssigner,
         piece_store: SharedPieceStore,
+        id: usize,
     ) -> Connection {
         let addr = stream.peer_addr().unwrap();
+        let num_pieces = piece_store.borrow().num_pieces();
         Self {
             am_choking: true,
             am_interested: false,
+            id,
+            total_read: 0,
             peer_choking: true,
             peer_interested: false,
-            peer_has: BitVec::from_elem(num_pieces as usize, false),
+            peer_has: BitVec::from_elem(num_pieces, false),
             stream: stream,
             last_keep_alive: std::time::Instant::now(),
-            block_manager: BlockManager::new(piece_assigner),
+            block_manager: BlockManager::new(piece_assigner, piece_store),
             pending_peer_requests: Vec::new(),
             pending_peer_cancels: Vec::new(),
             peer_info: PeerInfo {
                 addr: addr,
                 id: peer_id.to_owned(),
             },
-            piece_store,
             read_some: None,
             read_buffer: Vec::new(),
+            num_pieces,
         }
     }
 
@@ -103,28 +85,22 @@ impl Connection {
     //     - Successfully did things, but no complete piece
     //     - Successfully downloaded a full piece
     pub fn update(&mut self) -> UpdateResult {
-        // Read in a loop until one of the following conditions are met:
-        //     - An error occurs
-        //     - There are no new messages to read (NoUpdate)
-        //     - A full piece has been assembled
         loop {
             let retval = self.read()?;
             match retval {
                 UpdateSuccess::NoUpdate => break,
-                UpdateSuccess::PieceComplete(piece) => {
-                    self.piece_store.borrow_mut().write(piece)?;
-                    return Ok(UpdateSuccess::Success);
-                }
                 UpdateSuccess::Success => continue,
             }
         }
         // Cancel requested Requests (TODO)
         // Respond to Requests (TODO)
-
         if !self.peer_choking {
             if self.block_manager.can_send_block_requests() {
-                self.block_manager
-                    .send_block_requests(&mut self.stream, &self.peer_has)?;
+                self.block_manager.send_block_requests(
+                    &mut self.stream,
+                    &self.peer_has,
+                    self.id,
+                )?;
                 return Ok(UpdateSuccess::Success);
             }
         }
@@ -151,46 +127,25 @@ impl Connection {
             self.read_some = None;
             return msg.update(self);
         }
-        if self.read_buffer.len() == 0 {
-            // None has been read so far
-            self.read_buffer.resize(length, 0);
-            let read = match self.stream.read(&mut self.read_buffer) {
-                Ok(l) => l as usize,
-                Err(error) => {
-                    if error.kind() == std::io::ErrorKind::WouldBlock {
-                        self.read_buffer.resize(0, 0);
-                        return Ok(UpdateSuccess::NoUpdate);
-                    }
-                    return Err(UpdateError::CommunicationError(error));
+        let prev_length = self.read_buffer.len();
+        let need_to_read = length - prev_length;
+        self.read_buffer.resize(length, 0);
+        let read = match self.stream.read(&mut self.read_buffer[prev_length..]) {
+            Ok(l) => l as usize,
+            Err(error) => {
+                if error.kind() == std::io::ErrorKind::WouldBlock {
+                    self.read_buffer.resize(prev_length, 0);
+                    return Ok(UpdateSuccess::NoUpdate);
                 }
-            };
-            if read < length {
-                // didn't read all
-                self.read_buffer.resize(read, 0);
-                return Ok(UpdateSuccess::NoUpdate);
+                return Err(UpdateError::CommunicationError(error));
             }
-        } else {
-            let prev_length = self.read_buffer.len();
-            let need_to_read = length - prev_length;
-            self.read_buffer.resize(length, 0);
-            let read = match self.stream.read(&mut self.read_buffer[prev_length..]) {
-                Ok(l) => l as usize,
-                Err(error) => {
-                    if error.kind() == std::io::ErrorKind::WouldBlock {
-                        self.read_buffer.resize(prev_length, 0);
-                        return Ok(UpdateSuccess::NoUpdate);
-                    }
-                    return Err(UpdateError::CommunicationError(error));
-                }
-            };
-            if read < need_to_read {
-                self.read_buffer.resize(prev_length + read, 0);
-                return Ok(UpdateSuccess::NoUpdate);
-            }
+        };
+        if read < need_to_read {
+            self.read_buffer.resize(prev_length + read, 0);
+            return Ok(UpdateSuccess::NoUpdate);
         }
-        // if we get to here, buffer is filled
+        self.total_read += 4 + length;
         let id = read_byte_from(&mut (&self.read_buffer[..]))? as i8;
-        //println!("Received message with id: {}", id);
         macro_rules! dispatch_message ( // This is really neat!
             ($($A:ident),*) => (
                 match id {
@@ -225,7 +180,6 @@ pub type UpdateResult = Result<UpdateSuccess, UpdateError>;
 pub enum UpdateSuccess {
     NoUpdate,
     Success,
-    PieceComplete(CompletedPiece),
 }
 
 #[derive(Debug)]

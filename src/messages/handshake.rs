@@ -2,10 +2,13 @@ use std::io::Error;
 use std::io::Read;
 use std::io::Write;
 
+use log::debug;
+
 type PeerId = [u8; 20];
 
 #[derive(Debug, Clone, Default)]
 pub struct Handshake {
+    pub reserved: [u8; 8],
     pub info_hash: crate::hash::Sha1Hash,
     pub peer_id: PeerId,
 }
@@ -18,24 +21,32 @@ impl Handshake {
         let mut result: Self = Default::default();
         result.info_hash = *info_hash;
         result.peer_id.copy_from_slice(peer_id.as_bytes());
+        result.reserved = [0, 0, 0, 0, 0, 0, 0, 0];
         result
     }
 
     pub fn read_from<T: Read>(reader: &mut T) -> Result<Self, Error> {
+        debug!("Reading handshake");
         verify_pstr(reader);
+        debug!("Verified PSTR");
         let mut info_hash = [0; crate::hash::SHA1_HASH_LENGTH];
         let mut peer_id = [0; crate::hash::SHA1_HASH_LENGTH];
         let mut reserved = [0; 8];
         reader.read_exact(&mut reserved)?;
         reader.read_exact(&mut info_hash)?;
         reader.read_exact(&mut peer_id)?;
-        Ok(Handshake { info_hash, peer_id })
+        Ok(Handshake {
+            reserved,
+            info_hash,
+            peer_id,
+        })
     }
 
     pub fn write_to<T: Write>(&self, writer: &mut T) -> Result<(), Error> {
+        debug!("Writing handshake");
         writer.write_all(&[Self::PSTR.len() as u8])?;
         writer.write_all(Self::PSTR)?;
-        writer.write_all(&[0, 0, 0, 0, 0, 0, 0, 0])?;
+        writer.write_all(&self.reserved)?;
         writer.write_all(&self.info_hash)?;
         writer.write_all(&self.peer_id)?;
         Ok(())
