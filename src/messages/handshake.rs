@@ -2,7 +2,7 @@ use std::io::Error;
 use std::io::Read;
 use std::io::Write;
 
-use log::debug;
+use log::{debug, info};
 
 type PeerId = [u8; 20];
 
@@ -27,7 +27,7 @@ impl Handshake {
 
     pub fn read_from<T: Read>(reader: &mut T) -> Result<Self, Error> {
         debug!("Reading handshake");
-        verify_pstr(reader);
+        verify_pstr(reader)?;
         debug!("Verified PSTR");
         let mut info_hash = [0; crate::hash::SHA1_HASH_LENGTH];
         let mut peer_id = [0; crate::hash::SHA1_HASH_LENGTH];
@@ -53,16 +53,31 @@ impl Handshake {
     }
 }
 
-fn read_byte<T: Read>(reader: &mut T) -> Result<u8, std::io::Error> {
+fn read_byte<T: Read>(reader: &mut T) -> Result<u8, Error> {
     let mut buffer = [0; 1];
     reader.read_exact(&mut buffer)?;
     Ok(buffer[0])
 }
 
-fn verify_pstr<T: Read>(reader: &mut T) {
-    let size = read_byte(reader).unwrap();
-    assert_eq!(size as usize, Handshake::PSTR.len());
+fn verify_pstr<T: Read>(reader: &mut T) -> Result<(), Error> {
+    let size = read_byte(reader)?;
+    if size as usize != Handshake::PSTR.len() {
+        info!(
+            "Peer failed handshake: expected {} for PSTR size, got {}",
+            Handshake::PSTR.len(),
+            size,
+        );
+        return Err(std::io::ErrorKind::InvalidData.into());
+    }
     let mut buffer = [0; Handshake::PSTR.len()];
-    reader.read_exact(&mut buffer).unwrap();
-    assert_eq!(&buffer, Handshake::PSTR);
+    reader.read_exact(&mut buffer)?;
+    if &buffer != Handshake::PSTR {
+        info!(
+            "Peer failed handshake: expected \"{:?}\" for PSTR, got \"{:?}\"",
+            Handshake::PSTR,
+            &buffer,
+        );
+        return Err(std::io::ErrorKind::InvalidData.into());
+    }
+    Ok(())
 }

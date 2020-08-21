@@ -5,9 +5,9 @@ use std::error::Error;
 use std::io::prelude::*;
 use std::path::Path;
 use std::rc::Rc;
+use std::sync::mpsc;
 
-use bit_vec::BitVec;
-use log::{debug, info, warn};
+use log::{debug, info};
 use mio::net::{TcpListener, TcpStream};
 use mio::{Events, Interest, Poll, Token};
 use slog::Drain;
@@ -36,8 +36,7 @@ use tracker::Tracker;
 extern crate slog;
 
 const LISTEN_PORT: u16 = 6881;
-
-const INITIATE_ONLY: bool = true;
+const MAX_PEERS: usize = 50;
 
 // Stats for Vuze
 // Value : Max Speed (MB/s)
@@ -69,10 +68,15 @@ fn validate_all_files(torrent: &Torrent) {
    let mut current_file_index = 0;
    for i in 0..num_pieces {
       let mut current_piece = Vec::new();
-      let piece_length = if i != num_pieces - 1 {
-         torrent.metainfo.piece_length
+      let piece_length = if i == num_pieces - 1 {
+         let leftover = torrent.metainfo.total_size % torrent.metainfo.piece_length;
+         if leftover == 0 {
+            torrent.metainfo.piece_length
+         } else {
+            leftover
+         }
       } else {
-         torrent.metainfo.total_size % torrent.metainfo.piece_length
+         torrent.metainfo.piece_length
       };
       while current_piece.len() < piece_length {
          let start = current_file_index;
@@ -93,7 +97,8 @@ fn validate_all_files(torrent: &Torrent) {
       }
       let actual = hash::hash_to_bytes(&current_piece);
       let expected = torrent.metainfo.pieces[i];
-      assert_eq!(actual, expected);
+      assert_eq!(actual, expected); // Since we have verified the individual pieces, something has
+                                    // gone quite wrong if this fails
    }
 }
 
@@ -104,12 +109,13 @@ fn create_connection(
    piece_store: SharedPieceStore,
    id: usize,
 ) -> Result<Connection, std::io::Error> {
-   info!("handling client");
+   info!("handling client {}", stream.peer_addr().unwrap());
    let num_pieces = torrent.metainfo.pieces.len();
    let mut buffer = Vec::new();
    buffer.resize(Handshake::SIZE as usize, 0);
    let mut total_read = 0;
    while total_read < Handshake::SIZE as usize {
+      // TODO: this should be handled truly nonblockingly, as it grinds the download to a halt
       let read = match stream.read(&mut buffer[total_read..]) {
          Ok(l) => l,
          Err(error) => {
@@ -117,7 +123,7 @@ fn create_connection(
                std::thread::sleep(std::time::Duration::from_millis(100));
                continue;
             }
-            panic!(error);
+            return Err(error);
          }
       };
       if read == 0 {
@@ -125,22 +131,23 @@ fn create_connection(
       }
       total_read += read;
    }
-   let handshake_from_peer = messages::Handshake::read_from(&mut (&buffer[..])).unwrap();
+   let handshake_from_peer = messages::Handshake::read_from(&mut (&buffer[..]))?;
    info!("Received handshake: {:?}", handshake_from_peer);
-   let mut peer = Connection::new_from_stream(
+   let mut peer = Connection::new_from_connected(
       num_pieces,
       &handshake_from_peer.peer_id,
       stream,
       piece_assigner.clone(),
       piece_store.clone(),
+      torrent.metainfo.info_hash_raw,
       id,
    );
    let handshake_to_peer = messages::Handshake::new(PEER_ID, &torrent.metainfo.info_hash_raw);
-   handshake_to_peer.write_to(&mut peer.stream).unwrap();
+   handshake_to_peer.write_to(&mut peer.stream)?;
    let msg = Unchoke {};
-   msg.write_to(&mut peer.stream).unwrap();
+   msg.write_to(&mut peer.stream)?;
    let msg = Interested {};
-   msg.write_to(&mut peer.stream).unwrap();
+   msg.write_to(&mut peer.stream)?;
    info!("Wrote interested");
    Ok(peer)
 }
@@ -151,38 +158,20 @@ fn connect_to_peer(
    piece_assigner: SharedPieceAssigner,
    piece_store: SharedPieceStore,
    id: usize,
-) -> Connection {
+) -> Result<Connection, std::io::Error> {
    info!("connect_to_peer begin {} {}", id, peer.addr);
    let num_pieces = torrent.metainfo.pieces.len();
-   let mut stream = std::net::TcpStream::connect(peer.addr).unwrap();
-   debug!("Connected to peer {}", id);
-   let handshake_to_peer = messages::Handshake::new(PEER_ID, &torrent.metainfo.info_hash_raw);
-   handshake_to_peer.write_to(&mut stream).unwrap();
-   let handshake_from_peer = messages::Handshake::read_from(&mut stream).unwrap();
-   debug!("Got handshake from peer {}", id);
-   /* sending empty bitfield here causes qBittorrent to disconnect
-      Only send when empty?
-   let msg = Bitfield {
-      bitfield: BitVec::from_elem(num_pieces, false),
-   };
-   msg.write_to(&mut stream).unwrap();
-   */
-   let msg = Unchoke {};
-   msg.write_to(&mut stream).unwrap();
-   let msg = Interested {};
-   msg.write_to(&mut stream).unwrap();
-   stream.set_nonblocking(true).unwrap();
-   let mut peer = Connection::new_from_stream(
+   let stream = TcpStream::connect(peer.addr)?;
+   let peer = Connection::new_from_unconnected(
+      peer.addr,
       num_pieces,
-      &handshake_from_peer.peer_id,
-      TcpStream::from_std(stream),
+      stream,
       piece_assigner.clone(),
       piece_store.clone(),
+      torrent.metainfo.info_hash_raw,
       id,
    );
-   peer.stream.flush().unwrap();
-   debug!("Wrote interested");
-   peer
+   Ok(peer)
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -223,14 +212,16 @@ fn main() -> Result<(), Box<dyn Error>> {
    );
 
    debug!("Listening for connection on port {}", LISTEN_PORT);
+
+   let (send, recv) = mpsc::channel();
    let piece_assigner = Rc::new(RefCell::new(PieceAssigner::new(
       num_pieces,
       torrent.metainfo.total_size,
       piece_length,
+      recv,
    )));
-   let piece_store: Rc<RefCell<_>> = Rc::new(RefCell::new(
-      FileSystem::new(&torrent, piece_assigner.clone()).unwrap(),
-   ));
+   let piece_store: Rc<RefCell<_>> =
+      Rc::new(RefCell::new(FileSystem::new(&torrent, send).unwrap()));
 
    const LISTENER: Token = Token(std::usize::MAX);
 
@@ -238,37 +229,45 @@ fn main() -> Result<(), Box<dyn Error>> {
    let mut next_socket_index = 0;
    let mut poll = Poll::new()?;
    let mut events = Events::with_capacity(1024);
-   let mut listener = None;
-   if INITIATE_ONLY {
-      let mut peer = connect_to_peer(
-         &response.peer_list[1],
+   let mut listener = TcpListener::bind(format!("10.0.0.2:{}", LISTEN_PORT).as_str().parse()?)?;
+   poll
+      .registry()
+      .register(&mut listener, LISTENER, Interest::READABLE)?;
+   for peer_info in &response.peer_list {
+      use std::str::FromStr;
+      if peer_info.addr.ip() == std::net::IpAddr::from_str("10.0.0.2").unwrap() {
+         continue;
+      }
+      let mut peer = match connect_to_peer(
+         peer_info,
          &torrent,
          piece_assigner.clone(),
          piece_store.clone(),
          next_socket_index,
-      );
+      ) {
+         Ok(value) => value,
+         Err(err) => {
+            debug!("Unable to connect to {}: {}", peer_info.addr, err);
+            continue;
+         }
+      };
       let token = Token(next_socket_index);
       next_socket_index += 1;
       poll
          .registry()
-         .register(&mut peer.stream, token, Interest::READABLE)?;
+         .register(&mut peer.stream, token, Interest::WRITABLE)?;
       connections.insert(token, peer);
-   } else {
-      listener = Some(TcpListener::bind(
-         format!("10.0.0.2:{}", LISTEN_PORT).as_str().parse()?,
-      )?);
-      poll
-         .registry()
-         .register(listener.as_mut().expect(""), LISTENER, Interest::READABLE)?;
+      if connections.len() >= 20 {
+         break;
+      }
    }
-
-   // Announce timer
+   // announce timer
    loop {
       poll.poll(&mut events, Some(std::time::Duration::from_secs(1)))?;
       for event in &events {
          match event.token() {
             LISTENER => loop {
-               match listener.as_mut().expect("").accept() {
+               match listener.accept() {
                   Ok((socket, _)) => {
                      // handle_new_peer
                      println!("new peer!");
@@ -280,8 +279,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                         next_socket_index,
                      ) {
                         Ok(conn) => conn,
-                        Err(_err) => {
-                           info!("Handshaked failed");
+                        Err(err) => {
+                           info!("Handshaked failed: {}", err);
                            continue;
                         }
                      };
@@ -299,10 +298,26 @@ fn main() -> Result<(), Box<dyn Error>> {
                }
             },
             token => loop {
-               if let UpdateSuccess::NoUpdate =
-                  connections.get_mut(&token).unwrap().update().unwrap()
-               {
-                  break;
+               let peer = connections.get_mut(&token).unwrap();
+               if event.is_writable() {
+                  // Writable means it is now connected
+                  poll
+                     .registry()
+                     .reregister(&mut peer.stream, token, Interest::READABLE)?;
+               }
+               match peer.update() {
+                  Ok(status) => {
+                     if let UpdateSuccess::NoUpdate = status {
+                        break;
+                     }
+                  }
+                  Err(error) => {
+                     // error in connection, remove
+                     info!("Removing peer {}: {}", token.0, error);
+                     poll.registry().deregister(&mut peer.stream)?;
+                     connections.remove(&token);
+                     break;
+                  }
                }
                if piece_store.borrow().done() {
                   break;

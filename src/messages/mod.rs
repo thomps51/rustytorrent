@@ -84,18 +84,47 @@ impl Message for Port {
 }
 
 // TODO genericize these fuction if possible
-fn read_u16<T: Read>(reader: &mut T) -> Result<u16, Error> {
+pub fn read_u16<T: Read>(reader: &mut T) -> Result<u16, Error> {
     let mut buffer = [0; 2];
     reader.read_exact(&mut buffer)?;
     Ok(u16::from_be_bytes(buffer))
 }
 
-fn read_u32<T: Read>(reader: &mut T) -> Result<u32, Error> {
+pub fn read_u32<T: Read>(reader: &mut T) -> Result<u32, Error> {
     let mut buffer = [0; 4];
     reader.read_exact(&mut buffer)?;
     Ok(u32::from_be_bytes(buffer))
 }
 
-fn to_u32_be(value: usize) -> [u8; 4] {
+pub trait Primative: Sized {
+    fn from_be_bytes(array: &[u8]) -> Self;
+}
+
+use std::convert::TryInto;
+macro_rules! ImplPrimative {
+    ($NAME:ident) => {
+        impl Primative for $NAME {
+            fn from_be_bytes(array: &[u8]) -> Self {
+                $NAME::from_be_bytes(array.try_into().unwrap())
+            }
+        }
+    };
+}
+
+ImplPrimative!(u16);
+ImplPrimative!(u32);
+ImplPrimative!(u128);
+
+pub fn read_as_be<T: Primative, U: Read>(reader: &mut U) -> Result<T, Error> {
+    // Ideally we would use an array here, but until rust gets better const generic support and
+    // we are able to do [u8; std::mem::size_of<T>()] here, it's easier to resort to a dynamic
+    // allocation using Vec.
+    let mut buffer = Vec::new();
+    buffer.resize(std::mem::size_of::<T>(), 0);
+    reader.read_exact(&mut buffer)?;
+    Ok(T::from_be_bytes(&buffer))
+}
+
+pub fn to_u32_be(value: usize) -> [u8; 4] {
     (value as u32).to_be_bytes()
 }

@@ -2,7 +2,7 @@ use std::io::Error;
 use std::io::Read;
 use std::io::Write;
 
-use log::{debug, info, warn};
+use log::debug;
 
 use super::super::Connection;
 use super::super::UpdateResult;

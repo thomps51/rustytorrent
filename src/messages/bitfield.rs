@@ -3,15 +3,12 @@ use std::io::Read;
 use std::io::Write;
 
 use bit_vec::BitVec;
-use log::debug;
 
 use super::super::Connection;
 use super::super::UpdateResult;
 use super::super::UpdateSuccess;
 use super::Message;
 use super::MessageLength;
-
-use crate::PieceStore;
 
 #[derive(Debug, Clone)]
 pub struct Bitfield {

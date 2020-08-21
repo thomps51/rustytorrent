@@ -35,10 +35,6 @@ impl BlockManager {
         self.blocks_in_flight < MAX_OPEN_REQUESTS_PER_PEER
     }
 
-    pub fn num_blocks_to_request(&self) -> usize {
-        MAX_OPEN_REQUESTS_PER_PEER - self.blocks_in_flight
-    }
-
     pub fn send_block_requests<T: Write>(
         &mut self,
         stream: &mut T,
@@ -150,6 +146,10 @@ impl PieceInFlight {
 
     pub fn get_block_request(&mut self) -> Option<Request> {
         if self.current_block >= self.num_blocks {
+            debug!(
+                "get_block_request with index: {}, current_block: {}, num_blocks: {}",
+                self.index, self.current_block, self.num_blocks
+            );
             return None;
         }
         let begin = self.current_block * Self::BLOCK_SIZE;

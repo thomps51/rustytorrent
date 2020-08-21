@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::VecDeque;
-use std::sync::Mutex;
+use std::sync::mpsc::Receiver;
 
 use bit_set::BitSet;
 use bit_vec::BitVec;
@@ -16,11 +16,16 @@ pub struct PieceAssigner {
     pieces: VecDeque<usize>,
     left: BitVec,
     assigned: HashMap<usize, HashSet<usize>>,
-    failed_hash_pieces: Mutex<VecDeque<usize>>,
+    failed_hash: Receiver<usize>,
 }
 
 impl PieceAssigner {
-    pub fn new(total_pieces: usize, total_size: usize, piece_size: usize) -> Self {
+    pub fn new(
+        total_pieces: usize,
+        total_size: usize,
+        piece_size: usize,
+        failed_hash: Receiver<usize>,
+    ) -> Self {
         let mut pieces = Vec::new();
         pieces.resize(total_pieces, 0);
         for i in 0..total_pieces {
@@ -34,7 +39,7 @@ impl PieceAssigner {
             pieces: pieces.into(),
             left: BitVec::from_elem(total_pieces, true),
             assigned: HashMap::new(),
-            failed_hash_pieces: VecDeque::new().into(),
+            failed_hash,
         }
     }
 
@@ -50,10 +55,7 @@ impl PieceAssigner {
             // start requesting missing pieces from other peers.  So we look for pieces that we
             // haven't received that the current peer has and we haven't already requested from that
             // peer.
-            if let Some(value) = {
-                let failed_hash = self.failed_hash_pieces.get_mut().unwrap();
-                failed_hash.pop_front()
-            } {
+            if let Ok(value) = self.failed_hash.try_recv() {
                 value
             } else {
                 let mut empty = HashSet::new();
@@ -92,19 +94,15 @@ impl PieceAssigner {
         self.left.set(index, false);
         let size = if index == self.total_pieces - 1 {
             println!("Last piece: {}", index);
-            self.total_size % self.piece_size
+            let leftover = self.total_size % self.piece_size;
+            if leftover == 0 {
+                self.piece_size
+            } else {
+                leftover
+            }
         } else {
             self.piece_size
         };
         Some((index, size))
-    }
-
-    // Give a piece back that wasn't verified or the peer had some sort of problem
-    pub fn give_back(&mut self, index: usize) {
-        self.failed_hash_pieces.get_mut().unwrap().push_back(index);
-    }
-
-    pub fn has_pieces(&self) -> bool {
-        self.pieces.len() != 0
     }
 }

@@ -11,7 +11,7 @@ use std::thread;
 use std::thread::JoinHandle;
 
 use bit_vec::BitVec;
-use log::{debug, info, warn};
+use log::warn;
 
 use crate::block_manager::CompletedPiece;
 use crate::block_manager::PieceInFlight;
@@ -20,7 +20,6 @@ use crate::hash::Sha1Hash;
 use crate::messages::Block;
 use crate::meta_info::File;
 use crate::torrent::Torrent;
-use crate::SharedPieceAssigner;
 
 // Struct that represents a "store" that writes pieces to file and has the current state of the
 // download
@@ -29,7 +28,7 @@ use crate::SharedPieceAssigner;
 
 pub trait PieceStore: Sized {
     // Create a new PieceStore for torrent.
-    fn new(torrent: &Torrent, piece_assigner: SharedPieceAssigner) -> Result<Self, Box<dyn Error>>;
+    fn new(torrent: &Torrent, failed_hash: Sender<usize>) -> Result<Self, Box<dyn Error>>;
 
     // Shows which pieces this PieceStore has.
     //
@@ -62,11 +61,11 @@ pub trait PieceStore: Sized {
 pub type AllocatedFiles = HashMap<PathBuf, fs::File>;
 
 pub struct FileSystem {
+    failed_hash: Sender<usize>,
     info: Arc<FileSystemInfo>,
     sender: Option<Sender<CompletedPiece>>,
     write_cache: HashMap<usize, PieceInFlight>,
     write_thread: Option<JoinHandle<()>>,
-    piece_assigner: SharedPieceAssigner,
 }
 
 impl FileSystem {
@@ -115,7 +114,7 @@ impl FileSystem {
 }
 
 impl PieceStore for FileSystem {
-    fn new(torrent: &Torrent, piece_assigner: SharedPieceAssigner) -> Result<Self, Box<dyn Error>> {
+    fn new(torrent: &Torrent, failed_hash: Sender<usize>) -> Result<Self, Box<dyn Error>> {
         let mut allocated_files = AllocatedFiles::new();
         for file in &torrent.metainfo.files {
             let path = &file.path;
@@ -140,21 +139,25 @@ impl PieceStore for FileSystem {
         //let have = BitVec::from_elem(num_pieces, false);
         let mut have = Vec::new();
         have.resize_with(num_pieces, || AtomicBool::new(false));
+        let mut last_piece_length = torrent.metainfo.total_size % torrent.metainfo.piece_length;
+        if last_piece_length == 0 {
+            last_piece_length = torrent.metainfo.piece_length;
+        }
         let info = Arc::new(FileSystemInfo {
             piece_hashes: torrent.metainfo.pieces.clone(),
             files_info: torrent.metainfo.files.clone(),
             piece_length: torrent.metainfo.piece_length,
-            last_piece_length: torrent.metainfo.total_size % torrent.metainfo.piece_length,
+            last_piece_length,
             files: allocated_files.into(),
             have: have.into(),
             have_count: Default::default(),
         });
         Ok(FileSystem {
+            failed_hash,
             info,
             sender: None,
             write_thread: None,
             write_cache: HashMap::new(),
-            piece_assigner: piece_assigner,
         })
     }
 
@@ -202,9 +205,10 @@ impl PieceStore for FileSystem {
                 sender.send(piece).unwrap();
                 self.sender = Some(sender);
                 let info = self.info.clone();
+                let mut failed_hash_sender = self.failed_hash.clone();
                 self.write_thread = Some(thread::spawn(move || {
                     while let Ok(piece) = receiver.recv() {
-                        info.write(piece);
+                        info.write(&mut failed_hash_sender, piece);
                     }
                 }))
             }
@@ -239,13 +243,14 @@ struct FileSystemInfo {
 }
 
 impl FileSystemInfo {
-    fn write(&self, piece: CompletedPiece) {
+    fn write(&self, failed_hash: &mut Sender<usize>, piece: CompletedPiece) {
         if self.have[piece.index].load(Ordering::Relaxed) {
             return;
         }
         if !is_valid_piece(&piece, &self.piece_hashes) {
             warn!("Piece {} has invalid hash", piece.index);
-            return; // PieceAssigner will take care of assigning missing pieces in Endgame mode (only if there are other peers though...)
+            failed_hash.send(piece.index).unwrap();
+            return;
         }
         let piece_begin_byte = piece.index * self.piece_length;
         let mut piece_current_byte = 0;
