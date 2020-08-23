@@ -5,6 +5,7 @@ use std::sync::mpsc::Receiver;
 
 use bit_set::BitSet;
 use bit_vec::BitVec;
+use log::debug;
 
 use rand::seq::SliceRandom;
 use rand::thread_rng;
@@ -56,6 +57,7 @@ impl PieceAssigner {
             // haven't received that the current peer has and we haven't already requested from that
             // peer.
             if let Ok(value) = self.failed_hash.try_recv() {
+                debug!("Endgame mode: got failed hash index: {}", value);
                 value
             } else {
                 let mut empty = HashSet::new();
@@ -64,8 +66,8 @@ impl PieceAssigner {
                 intersection.negate();
                 intersection.and(&peer_has);
                 let intersection_set = BitSet::from_bit_vec(intersection);
-                if let Some(index) = intersection_set.iter().position(|x| !assigned.contains(&x)) {
-                    assigned.insert(index);
+                if let Some(index) = intersection_set.iter().find(|x| !assigned.contains(&x)) {
+                    debug!("Endgame mode: assigning piece {}", index);
                     index
                 } else {
                     return None;
@@ -93,7 +95,6 @@ impl PieceAssigner {
             .insert(index);
         self.left.set(index, false);
         let size = if index == self.total_pieces - 1 {
-            println!("Last piece: {}", index);
             let leftover = self.total_size % self.piece_size;
             if leftover == 0 {
                 self.piece_size

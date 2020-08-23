@@ -2,7 +2,6 @@
 
 use std::cell::RefCell;
 use std::error::Error;
-use std::io::prelude::*;
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::mpsc;
@@ -25,7 +24,6 @@ mod torrent;
 mod tracker;
 
 use connection::*;
-use messages::*;
 use piece_assigner::PieceAssigner;
 use piece_store::*;
 use torrent::Torrent;
@@ -36,7 +34,7 @@ use tracker::Tracker;
 extern crate slog;
 
 const LISTEN_PORT: u16 = 6881;
-const MAX_PEERS: usize = 50;
+const MAX_PEERS: usize = 30;
 
 // Stats for Vuze
 // Value : Max Speed (MB/s)
@@ -103,7 +101,7 @@ fn validate_all_files(torrent: &Torrent) {
 }
 
 fn create_connection(
-   mut stream: TcpStream,
+   stream: TcpStream,
    torrent: &Torrent,
    piece_assigner: SharedPieceAssigner,
    piece_store: SharedPieceStore,
@@ -111,44 +109,14 @@ fn create_connection(
 ) -> Result<Connection, std::io::Error> {
    info!("handling client {}", stream.peer_addr().unwrap());
    let num_pieces = torrent.metainfo.pieces.len();
-   let mut buffer = Vec::new();
-   buffer.resize(Handshake::SIZE as usize, 0);
-   let mut total_read = 0;
-   while total_read < Handshake::SIZE as usize {
-      // TODO: this should be handled truly nonblockingly, as it grinds the download to a halt
-      let read = match stream.read(&mut buffer[total_read..]) {
-         Ok(l) => l,
-         Err(error) => {
-            if error.kind() == std::io::ErrorKind::WouldBlock {
-               std::thread::sleep(std::time::Duration::from_millis(100));
-               continue;
-            }
-            return Err(error);
-         }
-      };
-      if read == 0 {
-         return Err(std::io::ErrorKind::UnexpectedEof.into());
-      }
-      total_read += read;
-   }
-   let handshake_from_peer = messages::Handshake::read_from(&mut (&buffer[..]))?;
-   info!("Received handshake: {:?}", handshake_from_peer);
-   let mut peer = Connection::new_from_connected(
+   let peer = Connection::new_from_incoming(
       num_pieces,
-      &handshake_from_peer.peer_id,
       stream,
       piece_assigner.clone(),
       piece_store.clone(),
       torrent.metainfo.info_hash_raw,
       id,
    );
-   let handshake_to_peer = messages::Handshake::new(PEER_ID, &torrent.metainfo.info_hash_raw);
-   handshake_to_peer.write_to(&mut peer.stream)?;
-   let msg = Unchoke {};
-   msg.write_to(&mut peer.stream)?;
-   let msg = Interested {};
-   msg.write_to(&mut peer.stream)?;
-   info!("Wrote interested");
    Ok(peer)
 }
 
@@ -162,7 +130,7 @@ fn connect_to_peer(
    info!("connect_to_peer begin {} {}", id, peer.addr);
    let num_pieces = torrent.metainfo.pieces.len();
    let stream = TcpStream::connect(peer.addr)?;
-   let peer = Connection::new_from_unconnected(
+   let peer = Connection::new_from_outgoing(
       peer.addr,
       num_pieces,
       stream,
@@ -197,7 +165,7 @@ fn main() -> Result<(), Box<dyn Error>> {
    let tracker = Tracker {
       address: torrent.metainfo.announce.clone(),
    };
-   let response = tracker.announce(&torrent, EventKind::Started)?;
+   let mut response = tracker.announce(&torrent, EventKind::Started)?;
    debug!("tracker response: {:?}", response);
 
    let num_pieces = torrent.metainfo.pieces.len();
@@ -233,13 +201,19 @@ fn main() -> Result<(), Box<dyn Error>> {
    poll
       .registry()
       .register(&mut listener, LISTENER, Interest::READABLE)?;
-   for peer_info in &response.peer_list {
+   let num_peers = if response.peer_list.len() < MAX_PEERS {
+      response.peer_list.len()
+   } else {
+      MAX_PEERS
+   };
+   let peer_infos = response.peer_list.drain(..num_peers);
+   for peer_info in peer_infos {
       use std::str::FromStr;
       if peer_info.addr.ip() == std::net::IpAddr::from_str("10.0.0.2").unwrap() {
          continue;
       }
       let mut peer = match connect_to_peer(
-         peer_info,
+         &peer_info,
          &torrent,
          piece_assigner.clone(),
          piece_store.clone(),
@@ -253,17 +227,30 @@ fn main() -> Result<(), Box<dyn Error>> {
       };
       let token = Token(next_socket_index);
       next_socket_index += 1;
+      // Registering the socket for Writable notifications will tell us when it is connected.
       poll
          .registry()
          .register(&mut peer.stream, token, Interest::WRITABLE)?;
       connections.insert(token, peer);
-      if connections.len() >= 20 {
-         break;
-      }
    }
    // announce timer
+   let mut last_update = std::time::Instant::now();
+   let time_between_updates = std::time::Duration::from_secs(1);
    loop {
       poll.poll(&mut events, Some(std::time::Duration::from_secs(1)))?;
+      let now = std::time::Instant::now();
+      if now - last_update > time_between_updates {
+         print!(
+            "Percent done: {:.2}%\r",
+            piece_store.borrow().percent_done()
+         );
+         use std::io::prelude::*;
+         std::io::stdout()
+            .flush()
+            .ok()
+            .expect("Could not flush stdout");
+         last_update = now;
+      }
       for event in &events {
          match event.token() {
             LISTENER => loop {
@@ -335,7 +322,7 @@ fn main() -> Result<(), Box<dyn Error>> {
          break;
       }
    }
-   validate_all_files(&torrent);
+   //validate_all_files(&torrent);
    info!("done!");
    Ok(())
 }

@@ -1,6 +1,7 @@
 use std::io::Error;
 use std::io::Read;
 use std::io::Write;
+use std::mem::{self, MaybeUninit};
 
 use super::super::Connection;
 use super::super::UpdateResult;
@@ -10,11 +11,13 @@ use super::to_u32_be;
 use super::Message;
 use super::MessageLength;
 
-#[derive(Debug, Clone)]
+const BLOCK_SIZE: usize = 1 << 14; // 16 KiB
+
+#[derive(Clone)]
 pub struct Block {
     pub index: usize,
     pub begin: usize,
-    pub block: Vec<u8>,
+    pub block: [u8; BLOCK_SIZE],
 }
 
 impl Message for Block {
@@ -29,9 +32,14 @@ impl Message for Block {
     fn read_data<T: Read>(reader: &mut T, length: usize) -> Result<Self, Error> {
         let index = read_u32(reader)? as usize;
         let begin = read_u32(reader)? as usize;
-        let mut block = Vec::new();
+        // Idea: instead of reading into a temp stack array, change it so that we can read directly
+        // into the buffer we use for pieces.  This would avoid us having to pass this around and
+        // then copy it into that buffer.  This would be quite a change and make this message a
+        // special case.
+        let block: [MaybeUninit<u8>; BLOCK_SIZE] = unsafe { MaybeUninit::uninit().assume_init() };
+        let mut block = unsafe { std::mem::transmute::<_, [u8; BLOCK_SIZE]>(block) };
         let size = length - 9; // id byte, 2 4-byte sizes
-        block.resize(size as usize, 0);
+        assert!(size <= BLOCK_SIZE);
         reader.read_exact(&mut block)?;
         Ok(Block {
             index,

@@ -13,12 +13,12 @@ reqwest = { version = "0.10.6", features = ["blocking"] }
 bit-set = "0.5.2"
 bit-vec = "0.6.2"
 mio = { version = "0.7", features = ["os-poll", "tcp"]}
-slog = { version = "2.5.2", features = ["max_level_trace", "release_max_level_warn"]}
+slog = { version = "2.5.2"}
 slog-async = { version = "2.5.0"}
 slog-term = { version = "2.6.0"}
 slog-stdlog = { version = "4.0.0"}
 slog-scope = { version = "4.0.0"}
-log = {version = "0.4.11"}
+log = {version = "0.4.11", features = ["max_level_debug", "release_max_level_info"]}
 rand = "0.7"
 
 [profile.release]

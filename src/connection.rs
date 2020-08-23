@@ -13,8 +13,13 @@ use crate::SharedPieceStore;
 
 pub enum State {
     Connecting,
-    HandshakeSent,
+    ReadingHandshake,
     Connected,
+}
+
+enum Type {
+    Incoming,
+    Outgoing,
 }
 
 pub struct Connection {
@@ -36,6 +41,7 @@ pub struct Connection {
     read_buffer: Vec<u8>,
     pub num_pieces: usize,
     state: State,
+    conn_type: Type,
 }
 
 fn read_byte_from<T: Read>(stream: &mut T) -> Result<u8, std::io::Error> {
@@ -49,9 +55,8 @@ impl Connection {
         self.last_keep_alive = std::time::Instant::now();
     }
 
-    pub fn new_from_connected(
+    pub fn new_from_incoming(
         num_pieces: usize,
-        peer_id: &[u8],
         stream: TcpStream,
         piece_assigner: SharedPieceAssigner,
         piece_store: SharedPieceStore,
@@ -75,16 +80,17 @@ impl Connection {
             pending_peer_cancels: Vec::new(),
             peer_info: PeerInfo {
                 addr: addr,
-                id: Some(peer_id.to_owned()),
+                id: None,
             },
             read_some: None,
             read_buffer: Vec::new(),
             num_pieces,
-            state: State::Connected,
+            state: State::ReadingHandshake,
+            conn_type: Type::Incoming,
         }
     }
 
-    pub fn new_from_unconnected(
+    pub fn new_from_outgoing(
         addr: std::net::SocketAddr,
         num_pieces: usize,
         stream: TcpStream,
@@ -115,6 +121,7 @@ impl Connection {
             read_buffer: Vec::new(),
             num_pieces,
             state: State::Connecting,
+            conn_type: Type::Outgoing,
         }
     }
 
@@ -161,11 +168,11 @@ impl Connection {
                 use crate::messages;
                 let handshake_to_peer = messages::Handshake::new(crate::PEER_ID, &self.info_hash);
                 handshake_to_peer.write_to(&mut self.stream)?;
-                self.state = State::HandshakeSent;
+                self.state = State::ReadingHandshake;
                 Ok(UpdateSuccess::Success)
             }
-            State::HandshakeSent => {
-                debug!("HandshakeSent...");
+            State::ReadingHandshake => {
+                debug!("Handshaking...");
                 assert!(self.read_buffer.len() < Handshake::SIZE as usize);
                 let length = Handshake::SIZE as usize;
                 let prev_length = self.read_buffer.len();
@@ -190,6 +197,11 @@ impl Connection {
                     messages::Handshake::read_from(&mut (&self.read_buffer[..]))?;
                 debug!("Got handshake from peer {}", self.id);
                 self.peer_info.id = Some(handshake_from_peer.peer_id.to_vec());
+                if let Type::Incoming = self.conn_type {
+                    let handshake_to_peer =
+                        messages::Handshake::new(crate::PEER_ID, &self.info_hash);
+                    handshake_to_peer.write_to(&mut self.stream)?;
+                }
                 let msg = Unchoke {};
                 msg.write_to(&mut self.stream)?;
                 let msg = Interested {};
@@ -224,19 +236,23 @@ impl Connection {
         }
         let prev_length = self.read_buffer.len();
         let need_to_read = length - prev_length;
-        self.read_buffer.resize(length, 0);
+        if length > self.read_buffer.capacity() {
+            self.read_buffer.resize(length, 0);
+        } else {
+            unsafe { self.read_buffer.set_len(length) }
+        }
         let read = match self.stream.read(&mut self.read_buffer[prev_length..]) {
             Ok(l) => l as usize,
             Err(error) => {
                 if error.kind() == std::io::ErrorKind::WouldBlock {
-                    self.read_buffer.resize(prev_length, 0);
+                    unsafe { self.read_buffer.set_len(prev_length) }
                     return Ok(UpdateSuccess::NoUpdate);
                 }
                 return Err(UpdateError::CommunicationError(error));
             }
         };
         if read < need_to_read {
-            self.read_buffer.resize(prev_length + read, 0);
+            unsafe { self.read_buffer.set_len(prev_length + read) }
             return Ok(UpdateSuccess::NoUpdate);
         }
         self.total_read += 4 + length;
@@ -263,7 +279,7 @@ impl Connection {
             Block,
             Cancel
         );
-        self.read_buffer.resize(0, 0);
+        unsafe { self.read_buffer.set_len(0) }
         self.read_some = None;
         retval
     }

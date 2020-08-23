@@ -59,7 +59,7 @@ impl BlockManager {
             ) {
                 let mut piece_in_flight = PieceInFlight::new(piece_length, piece_index);
                 let msg = piece_in_flight.get_block_request().unwrap();
-                debug!("sending block request: {:?}", msg);
+                debug!("sending new index block request: {:?}", msg);
                 msg.write_to(stream)?;
                 self.blocks_in_flight += 1;
                 self.piece_in_flight = Some(piece_in_flight);
@@ -84,6 +84,7 @@ pub struct PieceInFlight {
     last_block_length: usize,
     num_blocks: usize,
     current_block: usize,
+    blocks_received: usize,
 }
 
 impl PieceInFlight {
@@ -108,10 +109,14 @@ impl PieceInFlight {
             last_block_length,
             num_blocks,
             current_block: 0,
+            blocks_received: 0,
         }
     }
 
     pub fn add_block(&mut self, block: &Block) -> Option<CompletedPiece> {
+        if self.piece.len() == 0 {
+            panic!("add_block() called after it returned a completed piece");
+        }
         if block.index != self.index {
             panic!("Error! Block is for a different piece!");
         }
@@ -127,17 +132,27 @@ impl PieceInFlight {
         } else {
             Self::BLOCK_SIZE
         };
+        if block_length > block.block.len() {
+            panic!("Incorrect block length received");
+        }
+        if self.have[block_index] {
+            return None;
+        }
+        self.blocks_received += 1;
         debug!("Received block {} of {}", block_index + 1, self.num_blocks);
-        for i in 0..block_length {
-            let offset = block.begin + i;
-            self.piece[offset] = block.block[i];
+        // This is safe since we have checked that block.begin is in bounds.
+        unsafe {
+            let dst_ptr = self.piece.as_mut_ptr().offset(block.begin as isize);
+            let src_ptr = block.block.as_ptr();
+            std::ptr::copy_nonoverlapping(src_ptr, dst_ptr, block_length);
         }
         self.have.set(block_index, true);
-        if self.have.all() {
+        if self.blocks_received == self.num_blocks {
             debug!("Got piece {}", self.index);
             Some(CompletedPiece {
                 index: self.index,
-                piece: self.piece.clone(),
+                piece: std::mem::replace(&mut self.piece, Vec::new()),
+                //piece: self.piece.drain(..).collect(),
             })
         } else {
             None

@@ -11,7 +11,7 @@ use std::thread;
 use std::thread::JoinHandle;
 
 use bit_vec::BitVec;
-use log::warn;
+use log::{debug, warn};
 
 use crate::block_manager::CompletedPiece;
 use crate::block_manager::PieceInFlight;
@@ -136,7 +136,6 @@ impl PieceStore for FileSystem {
             allocated_files.insert(path.to_path_buf(), f);
         }
         let num_pieces = torrent.metainfo.pieces.len();
-        //let have = BitVec::from_elem(num_pieces, false);
         let mut have = Vec::new();
         have.resize_with(num_pieces, || AtomicBool::new(false));
         let mut last_piece_length = torrent.metainfo.total_size % torrent.metainfo.piece_length;
@@ -247,6 +246,7 @@ impl FileSystemInfo {
         if self.have[piece.index].load(Ordering::Relaxed) {
             return;
         }
+        debug!("Writing piece {} to disk", piece.index);
         if !is_valid_piece(&piece, &self.piece_hashes) {
             warn!("Piece {} has invalid hash", piece.index);
             failed_hash.send(piece.index).unwrap();

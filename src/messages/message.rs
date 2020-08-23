@@ -23,7 +23,7 @@ impl From<MessageLength> for usize {
 
 // Default case will handle fixed length messages with no associated data, others will
 // be custom defined.
-pub trait Message: Sized + std::fmt::Debug {
+pub trait Message: Sized {
     const ID: i8;
     const SIZE: MessageLength;
     const NAME: &'static str;
