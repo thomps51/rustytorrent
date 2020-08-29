@@ -140,7 +140,7 @@ impl PieceInFlight {
         }
         self.blocks_received += 1;
         debug!("Received block {} of {}", block_index + 1, self.num_blocks);
-        // This is safe since we have checked that block.begin is in bounds.
+        // This is safe since we have checked that block.begin and block_length are in bounds.
         unsafe {
             let dst_ptr = self.piece.as_mut_ptr().offset(block.begin as isize);
             let src_ptr = block.block.as_ptr();
@@ -152,7 +152,6 @@ impl PieceInFlight {
             Some(CompletedPiece {
                 index: self.index,
                 piece: std::mem::replace(&mut self.piece, Vec::new()),
-                //piece: self.piece.drain(..).collect(),
             })
         } else {
             None

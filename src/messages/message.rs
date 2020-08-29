@@ -4,8 +4,7 @@ use std::io::Write;
 
 use log::debug;
 
-use super::super::Connection;
-use super::super::UpdateResult;
+use crate::connection::{Connection, UpdateResult};
 
 pub enum MessageLength {
     Fixed(usize),

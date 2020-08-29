@@ -1,7 +1,7 @@
 use std::io::prelude::*;
 
 use bit_vec::BitVec;
-use log::debug;
+use log::{debug, info};
 use mio::net::TcpStream;
 
 use crate::block_manager::BlockManager;
@@ -196,6 +196,12 @@ impl Connection {
                 let handshake_from_peer =
                     messages::Handshake::read_from(&mut (&self.read_buffer[..]))?;
                 debug!("Got handshake from peer {}", self.id);
+                if handshake_from_peer.peer_id == crate::PEER_ID.as_bytes() {
+                    // Avoid connecting to self
+                    return Err(UpdateError::CommunicationError(
+                        std::io::ErrorKind::AlreadyExists.into(),
+                    ));
+                }
                 self.peer_info.id = Some(handshake_from_peer.peer_id.to_vec());
                 if let Type::Incoming = self.conn_type {
                     let handshake_to_peer =
@@ -237,6 +243,21 @@ impl Connection {
         let prev_length = self.read_buffer.len();
         let need_to_read = length - prev_length;
         if length > self.read_buffer.capacity() {
+            let max_length = crate::messages::BLOCK_SIZE * 20;
+            if length > max_length {
+                // Some peers seem to send oversized length data (like 100 MB or more), which is
+                // possibly them sending an extended handshake incorrectly (we haven't requested
+                // one).  So we cap the max length at 10x block size, which allows for a bitfield
+                // for files around 1 TB with 4 MB pieces.
+                info!(
+                    "Removing peer {:?} for oversized length request of {}",
+                    &self.peer_info.id.as_ref().unwrap(),
+                    length
+                );
+                return Err(UpdateError::CommunicationError(
+                    std::io::ErrorKind::InvalidData.into(),
+                ));
+            }
             self.read_buffer.resize(length, 0);
         } else {
             unsafe { self.read_buffer.set_len(length) }

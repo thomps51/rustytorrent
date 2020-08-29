@@ -2,17 +2,15 @@ use std::io::Error;
 use std::io::Read;
 use std::io::Write;
 
-use super::super::Connection;
-use super::super::UpdateError;
-use super::super::UpdateResult;
-use super::super::UpdateSuccess;
-use super::read_u32;
+use super::read_as_be;
+use super::to_u32_be;
 use super::Message;
 use super::MessageLength;
+use crate::connection::{Connection, UpdateError, UpdateResult, UpdateSuccess};
 
 #[derive(Debug, Clone)]
 pub struct Have {
-    index: u32,
+    pub index: usize,
 }
 
 impl Message for Have {
@@ -21,8 +19,10 @@ impl Message for Have {
     const NAME: &'static str = "Have";
 
     fn read_data<T: Read>(reader: &mut T, _: usize) -> Result<Self, Error> {
-        let index = read_u32(reader)?;
-        Ok(Have { index })
+        let index: u32 = read_as_be(reader)?;
+        Ok(Have {
+            index: index as usize,
+        })
     }
     fn update(self, connection: &mut Connection) -> UpdateResult {
         if self.index as usize >= connection.peer_has.len() {
@@ -33,7 +33,7 @@ impl Message for Have {
     }
 
     fn write_data<T: Write>(&self, writer: &mut T) -> Result<(), Error> {
-        writer.write_all(&self.index.to_be_bytes())?;
+        writer.write_all(&to_u32_be(self.index))?;
         Ok(())
     }
 }

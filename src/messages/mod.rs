@@ -25,12 +25,11 @@ pub use block::*;
 pub mod cancel;
 pub use cancel::*;
 
-use super::Connection;
-use super::UpdateResult;
-use super::UpdateSuccess;
+use crate::connection::{Connection, UpdateResult, UpdateSuccess};
 use std::io::Error;
 use std::io::Read;
 use std::io::Write;
+
 macro_rules! ImplSingleByteMessage {
     ($NAME:ident, $ID:literal, $Flag:ident, $Value:literal) => {
         #[derive(Debug, Clone)]
@@ -68,7 +67,7 @@ impl Message for Port {
     const NAME: &'static str = "Port";
 
     fn read_data<T: Read>(reader: &mut T, _: usize) -> Result<Self, Error> {
-        let listen_port = read_u16(reader)?;
+        let listen_port = read_as_be(reader)?;
         Ok(Port { listen_port })
     }
 
@@ -81,19 +80,6 @@ impl Message for Port {
         writer.write_all(&self.listen_port.to_be_bytes())?;
         Ok(())
     }
-}
-
-// TODO genericize these fuction if possible
-pub fn read_u16<T: Read>(reader: &mut T) -> Result<u16, Error> {
-    let mut buffer = [0; 2];
-    reader.read_exact(&mut buffer)?;
-    Ok(u16::from_be_bytes(buffer))
-}
-
-pub fn read_u32<T: Read>(reader: &mut T) -> Result<u32, Error> {
-    let mut buffer = [0; 4];
-    reader.read_exact(&mut buffer)?;
-    Ok(u32::from_be_bytes(buffer))
 }
 
 pub trait Primative: Sized {

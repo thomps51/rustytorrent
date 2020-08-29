@@ -1,9 +1,8 @@
 use std::error::Error;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::path::Path;
 use std::str::FromStr;
 
-use log::debug;
+use log::{debug, info};
 use reqwest;
 
 use crate::bencoding;
@@ -11,6 +10,7 @@ use crate::torrent::Torrent;
 
 pub struct Tracker {
     pub address: String,
+    pub listen_port: u16,
 }
 
 #[derive(Debug, Clone)]
@@ -55,10 +55,10 @@ impl Tracker {
     ) -> Result<TrackerResponse, Box<dyn Error>> {
         debug_assert_eq!(crate::PEER_ID.len(), 20);
         let encoded = format!(
-            "info_hash={}&peer_id={}&port={}&uploaded={}&downloaded={}&left={}&event={}&compact=0",
+            "info_hash={}&peer_id={}&port={}&uploaded={}&downloaded={}&left={}&event={}",
             torrent.metainfo.info_hash_uri,
             crate::PEER_ID,
-            crate::LISTEN_PORT.to_string(),
+            self.listen_port.to_string(),
             torrent.downloaded.to_string(),
             torrent.uploaded.to_string(),
             torrent.left.to_string(),
@@ -66,21 +66,17 @@ impl Tracker {
         );
 
         let endpoint = format!("{}?{}", self.address, encoded);
-        println!("tracker announce endpoint: {}", endpoint);
+        info!("tracker announce endpoint: {}", endpoint);
 
-        let response_dict = if crate::TEST_MODE {
-            bencoding::parse_into_dictionary(Path::new("sample_response.txt"))?
-        } else {
-            let body = reqwest::blocking::get(&endpoint)?.bytes()?;
-            println!("response bytes: '{:?}'", body);
-            let response = bencoding::parse(&body)?;
-            response.as_dict()?.clone()
-        };
+        let body = reqwest::blocking::get(&endpoint)?.bytes()?;
+        debug!("response bytes: '{:?}'", body);
+        let response = bencoding::parse(&body)?;
+        let response_dict = response.as_dict()?;
         if let Some(failure) = response_dict.get("failure reason") {
             return Err(format!("Failed to get tracker response: {}", failure.as_utf8()?).into());
         }
         let interval = response_dict["interval"].as_int()?;
-        println!("interval: {}", interval);
+        debug!("interval: {}", interval);
         let mut peer_list = PeerInfoList::new();
         match &response_dict["peers"] {
             bencoding::DataKind::List(peer_list_raw) => {

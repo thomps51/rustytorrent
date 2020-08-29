@@ -2,11 +2,9 @@ use std::io::Error;
 use std::io::Read;
 use std::io::Write;
 
-use super::super::Connection;
-use super::super::UpdateResult;
-use super::super::UpdateSuccess;
 use super::Message;
 use super::MessageLength;
+use crate::connection::{Connection, UpdateResult, UpdateSuccess};
 
 #[derive(Debug, Clone)]
 pub struct KeepAlive {}

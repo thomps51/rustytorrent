@@ -82,8 +82,6 @@ impl PieceAssigner {
             intersection.and(&self.left);
             if let Some(index) = intersection.iter().position(|x| x == true) {
                 self.pieces.retain(|x| *x != index);
-                self.pieces
-                    .remove(self.pieces.iter().position(|x| *x == index).expect(""));
                 index
             } else {
                 return None;

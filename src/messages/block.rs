@@ -1,17 +1,15 @@
 use std::io::Error;
 use std::io::Read;
 use std::io::Write;
-use std::mem::{self, MaybeUninit};
+use std::mem::MaybeUninit;
 
-use super::super::Connection;
-use super::super::UpdateResult;
-use super::super::UpdateSuccess;
-use super::read_u32;
+use super::read_as_be;
 use super::to_u32_be;
 use super::Message;
 use super::MessageLength;
+use crate::connection::{Connection, UpdateResult, UpdateSuccess};
 
-const BLOCK_SIZE: usize = 1 << 14; // 16 KiB
+pub const BLOCK_SIZE: usize = 1 << 14; // 16 KiB
 
 #[derive(Clone)]
 pub struct Block {
@@ -30,8 +28,8 @@ impl Message for Block {
     }
 
     fn read_data<T: Read>(reader: &mut T, length: usize) -> Result<Self, Error> {
-        let index = read_u32(reader)? as usize;
-        let begin = read_u32(reader)? as usize;
+        let index: u32 = read_as_be(reader)?;
+        let begin: u32 = read_as_be(reader)?;
         // Idea: instead of reading into a temp stack array, change it so that we can read directly
         // into the buffer we use for pieces.  This would avoid us having to pass this around and
         // then copy it into that buffer.  This would be quite a change and make this message a
@@ -42,8 +40,8 @@ impl Message for Block {
         assert!(size <= BLOCK_SIZE);
         reader.read_exact(&mut block)?;
         Ok(Block {
-            index,
-            begin,
+            index: index as usize,
+            begin: begin as usize,
             block,
         })
     }

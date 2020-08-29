@@ -13,11 +13,9 @@ use std::thread::JoinHandle;
 use bit_vec::BitVec;
 use log::{debug, warn};
 
-use crate::block_manager::CompletedPiece;
-use crate::block_manager::PieceInFlight;
-use crate::hash;
-use crate::hash::Sha1Hash;
-use crate::messages::Block;
+use crate::block_manager::{CompletedPiece, PieceInFlight};
+use crate::hash::{self, Sha1Hash};
+use crate::messages::{Block, Have};
 use crate::meta_info::File;
 use crate::torrent::Torrent;
 
@@ -28,7 +26,11 @@ use crate::torrent::Torrent;
 
 pub trait PieceStore: Sized {
     // Create a new PieceStore for torrent.
-    fn new(torrent: &Torrent, failed_hash: Sender<usize>) -> Result<Self, Box<dyn Error>>;
+    fn new(
+        torrent: &Torrent,
+        failed_hash: Sender<usize>,
+        have_send: Sender<Have>,
+    ) -> Result<Self, Box<dyn Error>>;
 
     // Shows which pieces this PieceStore has.
     //
@@ -62,6 +64,7 @@ pub type AllocatedFiles = HashMap<PathBuf, fs::File>;
 
 pub struct FileSystem {
     failed_hash: Sender<usize>,
+    have_send: Sender<Have>,
     info: Arc<FileSystemInfo>,
     sender: Option<Sender<CompletedPiece>>,
     write_cache: HashMap<usize, PieceInFlight>,
@@ -114,7 +117,11 @@ impl FileSystem {
 }
 
 impl PieceStore for FileSystem {
-    fn new(torrent: &Torrent, failed_hash: Sender<usize>) -> Result<Self, Box<dyn Error>> {
+    fn new(
+        torrent: &Torrent,
+        failed_hash: Sender<usize>,
+        have_send: Sender<Have>,
+    ) -> Result<Self, Box<dyn Error>> {
         let mut allocated_files = AllocatedFiles::new();
         for file in &torrent.metainfo.files {
             let path = &file.path;
@@ -153,6 +160,7 @@ impl PieceStore for FileSystem {
         });
         Ok(FileSystem {
             failed_hash,
+            have_send,
             info,
             sender: None,
             write_thread: None,
@@ -205,9 +213,10 @@ impl PieceStore for FileSystem {
                 self.sender = Some(sender);
                 let info = self.info.clone();
                 let mut failed_hash_sender = self.failed_hash.clone();
+                let mut have_send = self.have_send.clone();
                 self.write_thread = Some(thread::spawn(move || {
                     while let Ok(piece) = receiver.recv() {
-                        info.write(&mut failed_hash_sender, piece);
+                        info.write(&mut failed_hash_sender, &mut have_send, piece);
                     }
                 }))
             }
@@ -242,7 +251,13 @@ struct FileSystemInfo {
 }
 
 impl FileSystemInfo {
-    fn write(&self, failed_hash: &mut Sender<usize>, piece: CompletedPiece) {
+    fn write(
+        &self,
+        failed_hash: &mut Sender<usize>,
+        have_send: &mut Sender<Have>,
+        piece: CompletedPiece,
+    ) {
+        // After successful write, notify a channel that a Have message needs to be sent to all peers
         if self.have[piece.index].load(Ordering::Relaxed) {
             return;
         }
@@ -281,6 +296,7 @@ impl FileSystemInfo {
                 file.flush().unwrap();
                 self.have[piece.index].store(true, Ordering::Relaxed);
                 self.have_count.fetch_add(1, Ordering::Relaxed);
+                have_send.send(Have { index: piece.index }).unwrap();
                 return;
             }
             piece_current_byte = end;

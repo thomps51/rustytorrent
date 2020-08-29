@@ -2,12 +2,10 @@ use std::io::Error;
 use std::io::Read;
 use std::io::Write;
 
-use super::super::Connection;
-use super::super::UpdateResult;
-use super::super::UpdateSuccess;
-use super::read_u32;
+use super::read_as_be;
 use super::Message;
 use super::MessageLength;
+use crate::connection::{Connection, UpdateResult, UpdateSuccess};
 
 #[derive(Debug, Clone)]
 pub struct Cancel {
@@ -22,9 +20,9 @@ impl Message for Cancel {
     const NAME: &'static str = "Cancel";
 
     fn read_data<T: Read>(reader: &mut T, _: usize) -> Result<Self, Error> {
-        let index = read_u32(reader)?;
-        let begin = read_u32(reader)?;
-        let length = read_u32(reader)?;
+        let index = read_as_be(reader)?;
+        let begin = read_as_be(reader)?;
+        let length = read_as_be(reader)?;
         Ok(Cancel {
             index,
             begin,
