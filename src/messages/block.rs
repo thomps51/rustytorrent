@@ -58,3 +58,20 @@ impl Message for Block {
         Ok(())
     }
 }
+
+impl Block {
+    pub fn read_and_update<T: Read>(
+        reader: &mut T,
+        block_manager: &mut crate::block_manager::BlockManager,
+        length: usize,
+    ) -> Result<(), Error> {
+        let index = read_as_be::<u32, T>(reader)? as usize;
+        let begin = read_as_be::<u32, T>(reader)? as usize;
+        let size = length - 9; // id byte, 2 4-byte sizes
+        block_manager.add_block_fn(index, begin, size, |dst| {
+            reader.read_exact(dst)?;
+            Ok(())
+        })?;
+        Ok(())
+    }
+}

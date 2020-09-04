@@ -11,7 +11,7 @@ use mio::{Events, Interest, Poll, Token};
 
 use crate::connection::Connection;
 use crate::connection::*;
-use crate::messages::{Have, Message};
+use crate::messages::Have;
 use crate::piece_assigner::PieceAssigner;
 use crate::piece_store::{FileSystem, PieceStore};
 use crate::torrent::Torrent;
@@ -28,6 +28,8 @@ const PRINT_UPDATE_TIME: std::time::Duration = std::time::Duration::from_secs(1)
 
 pub struct ConnectionManager {
     connections: HashMap<Token, Connection>,
+    downloaded: usize,
+    uploaded: usize,
     last_update: std::time::Instant,
     next_socket_index: usize,
     peer_list: Vec<PeerInfo>,
@@ -49,6 +51,7 @@ impl ConnectionManager {
         let piece_length = torrent.metainfo.piece_length;
         let (send, recv) = mpsc::channel();
         let (send_have, recv_have) = mpsc::channel();
+        info!("Piece length: {}, Num pieces: {}", piece_length, num_pieces);
         let piece_assigner = Rc::new(RefCell::new(PieceAssigner::new(
             num_pieces,
             torrent.metainfo.total_size,
@@ -61,6 +64,8 @@ impl ConnectionManager {
         let poll = Poll::new().unwrap();
         ConnectionManager {
             connections: HashMap::new(),
+            downloaded: 0,
+            uploaded: 0,
             last_update: std::time::Instant::now(),
             next_socket_index: 0,
             peer_list: Vec::new(),
@@ -103,17 +108,18 @@ impl ConnectionManager {
                 self.add_peers();
             }
             if self.piece_store.borrow().done() {
+                assert!(self.piece_store.borrow().verify_all_files());
                 break;
             }
         }
         Ok(())
     }
 
+    // Accept incoming connections
     fn accept_connections(&mut self, listener: &mut TcpListener) {
         loop {
             match listener.accept() {
                 Ok((stream, _)) => {
-                    println!("new peer!");
                     let num_pieces = self.torrent.metainfo.pieces.len();
                     let mut peer = Connection::new_from_incoming(
                         num_pieces,
@@ -175,6 +181,7 @@ impl ConnectionManager {
         }
     }
 
+    // Handle Poll event
     fn handle_event(&mut self, token: Token, event: &Event) {
         loop {
             let peer = self.connections.get_mut(&token).unwrap();
@@ -187,19 +194,24 @@ impl ConnectionManager {
             }
             match peer.update() {
                 Ok(status) => {
+                    if let UpdateSuccess::Transferred {
+                        downloaded,
+                        uploaded,
+                    } = status
+                    {
+                        self.downloaded += downloaded;
+                        self.uploaded += uploaded;
+                    }
                     if let UpdateSuccess::NoUpdate = status {
                         break;
                     }
                 }
                 Err(error) => {
-                    info!("Removing peer {}: {}", token.0, error);
+                    info!("Removing peer {}: {} while reading", token.0, error);
                     self.poll.registry().deregister(&mut peer.stream).unwrap();
                     self.connections.remove(&token);
                     break;
                 }
-            }
-            if self.piece_store.borrow().done() {
-                break;
             }
         }
     }
@@ -207,9 +219,15 @@ impl ConnectionManager {
     fn print_info(&mut self) {
         let now = std::time::Instant::now();
         if now - self.last_update > PRINT_UPDATE_TIME {
+            let download_rate = (self.downloaded as f64) / ((1 << 20) as f64);
+            self.downloaded = 0;
+            self.uploaded = 0;
+
             print!(
-                "Percent done: {:.2}%\r",
-                self.piece_store.borrow().percent_done()
+                "Percent done: {:.2}% Download: {:.2} MiB/s Peers: {}       \r",
+                self.piece_store.borrow().percent_done(),
+                download_rate,
+                self.connections.len(),
             );
             use std::io::prelude::*;
             std::io::stdout()
@@ -221,6 +239,8 @@ impl ConnectionManager {
     }
 
     // Send have messages to peers that do not have the associated piece.
+    // Todo:
+    // take into account if peer is choking?
     fn send_haves(&mut self) {
         while let Ok(have) = self.recv_have.try_recv() {
             let mut to_remove = Vec::new();
@@ -228,11 +248,11 @@ impl ConnectionManager {
                 if conn.peer_has[have.index] {
                     continue;
                 }
-                if let Err(error) = have.write_to(&mut conn.stream) {
-                    info!("Disconnecting peer {}: {}", id.0, error);
+                if let Err(error) = conn.send(&have) {
+                    info!("Disconnecting peer {}: {} while sending", id.0, error);
+                    self.poll.registry().deregister(&mut conn.stream).unwrap();
+                    to_remove.push(*id);
                 }
-                self.poll.registry().deregister(&mut conn.stream).unwrap();
-                to_remove.push(*id);
             }
             for id in to_remove {
                 self.connections.remove(&id);

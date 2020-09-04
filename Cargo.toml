@@ -23,7 +23,7 @@ rand = "0.7"
 
 [profile.release]
 opt-level = 3
-debug = false
+debug = true
 debug-assertions = false
 overflow-checks = false
 lto = false

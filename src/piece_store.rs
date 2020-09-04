@@ -32,6 +32,8 @@ pub trait PieceStore: Sized {
         have_send: Sender<Have>,
     ) -> Result<Self, Box<dyn Error>>;
 
+    fn done(&self) -> bool;
+
     // Shows which pieces this PieceStore has.
     //
     // Note that there might be a race here; pieces may be done but have not yet been written to
@@ -53,7 +55,7 @@ pub trait PieceStore: Sized {
 
     fn percent_done(&self) -> f64;
 
-    fn done(&self) -> bool;
+    fn verify_all_files(&self) -> bool;
 
     fn write_block(&mut self, block: Block) -> Result<(), std::io::Error>;
 
@@ -73,7 +75,7 @@ pub struct FileSystem {
 
 impl FileSystem {
     fn get_bytes(&self, index: usize, offset: usize, num_bytes: usize) -> Option<Vec<u8>> {
-        if self.info.have[index].load(Ordering::Relaxed) {
+        if !self.info.have[index].load(Ordering::Relaxed) {
             return None;
         }
         let mut result = Vec::new();
@@ -113,6 +115,25 @@ impl FileSystem {
         } else {
             self.info.piece_length
         }
+    }
+
+    pub fn write_block_fn<F: FnOnce(&mut [u8]) -> Result<(), std::io::Error>>(
+        &mut self,
+        index: usize,
+        begin: usize,
+        length: usize,
+        func: F,
+    ) -> Result<(), std::io::Error> {
+        let piece_length = self.get_piece_length(index);
+        let piece = self
+            .write_cache
+            .entry(index)
+            .or_insert_with(|| PieceInFlight::new(piece_length, index));
+        if let Ok(Some(completed)) = piece.add_block_fn(index, begin, length, func) {
+            self.write(completed)?;
+            self.write_cache.remove(&index);
+        }
+        Ok(())
     }
 }
 
@@ -172,7 +193,7 @@ impl PieceStore for FileSystem {
         return self.info.have_count.load(Ordering::Relaxed) == self.info.piece_hashes.len();
     }
 
-    // This should have a cache layer so we don't go to disk everytime
+    // This should have a cache layer so we don't go to disk for each block
     fn get_block(&self, index: usize, offset: usize) -> Option<Vec<u8>> {
         const BLOCK_SIZE: usize = 1 << 14; // 16 KiB
         self.get_bytes(index, offset, BLOCK_SIZE)
@@ -181,7 +202,7 @@ impl PieceStore for FileSystem {
     // Returns None if we do not have that piece
     // This should have a cache layer so we don't go to disk everytime
     fn get_piece(&self, index: usize) -> Option<Vec<u8>> {
-        self.get_bytes(index, 0, self.info.piece_length)
+        self.get_bytes(index, 0, self.get_piece_length(index))
     }
 
     fn have(&self) -> BitVec {
@@ -199,14 +220,22 @@ impl PieceStore for FileSystem {
             / self.info.piece_hashes.len() as f64;
     }
 
+    fn verify_all_files(&self) -> bool {
+        let num_pieces = self.info.piece_hashes.len();
+        let mut result = true;
+        for i in 0..num_pieces {
+            let piece = self.get_piece(i).unwrap();
+            result = is_valid_piece(&piece, i, &self.info.piece_hashes);
+            if !result {
+                warn!("Hash check failed on piece {}", i);
+            }
+        }
+        result
+    }
+
     fn write(&mut self, piece: CompletedPiece) -> Result<(), std::io::Error> {
         match &self.sender {
-            Some(sender) => {
-                if let Err(error) = sender.send(piece) {
-                    println!("{}", error);
-                    panic!(error);
-                }
-            }
+            Some(sender) => sender.send(piece).unwrap(),
             None => {
                 let (sender, receiver) = channel();
                 sender.send(piece).unwrap();
@@ -257,12 +286,11 @@ impl FileSystemInfo {
         have_send: &mut Sender<Have>,
         piece: CompletedPiece,
     ) {
-        // After successful write, notify a channel that a Have message needs to be sent to all peers
         if self.have[piece.index].load(Ordering::Relaxed) {
             return;
         }
         debug!("Writing piece {} to disk", piece.index);
-        if !is_valid_piece(&piece, &self.piece_hashes) {
+        if !is_valid_piece(&piece.piece, piece.index, &self.piece_hashes) {
             warn!("Piece {} has invalid hash", piece.index);
             failed_hash.send(piece.index).unwrap();
             return;
@@ -306,8 +334,8 @@ impl FileSystemInfo {
     }
 }
 
-fn is_valid_piece(piece: &CompletedPiece, piece_hashes: &Vec<Sha1Hash>) -> bool {
-    let actual = hash::hash_to_bytes(&piece.piece);
-    let expected = piece_hashes[piece.index];
+fn is_valid_piece(piece: &[u8], index: usize, piece_hashes: &Vec<Sha1Hash>) -> bool {
+    let actual = hash::hash_to_bytes(piece);
+    let expected = piece_hashes[index];
     actual == expected
 }
