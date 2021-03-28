@@ -3,10 +3,13 @@ use std::io::prelude::*;
 use bit_vec::BitVec;
 use log::{debug, info};
 use mio::net::TcpStream;
+use mio::{Interest, Poll, Token};
 
 use crate::block_manager::BlockManager;
+use crate::constants::PEER_ID;
 use crate::hash::Sha1Hash;
 use crate::messages::*;
+use crate::read_buffer::ReadBuffer;
 use crate::tracker::PeerInfo;
 use crate::SharedPieceAssigner;
 use crate::SharedPieceStore;
@@ -28,20 +31,21 @@ pub struct Connection {
     id: usize,
     pub peer_choking: bool,
     pub peer_interested: bool,
-    pub peer_has: BitVec, // Which pieces the peer has
-    pub stream: TcpStream,
+    pub peer_has: BitVec,
+    stream: TcpStream,
     last_keep_alive: std::time::Instant,
-    pub block_manager: BlockManager,
+    block_manager: BlockManager,
     info_hash: Sha1Hash,
     pub pending_peer_requests: Vec<Request>,
     pub pending_peer_cancels: Vec<Cancel>,
-    pub peer_info: PeerInfo,
+    peer_info: PeerInfo,
     read_some: Option<usize>,
-    read_buffer: Vec<u8>,
+    read_buffer: ReadBuffer,
     send_buffer: Vec<u8>,
     pub num_pieces: usize,
     state: State,
     conn_type: Type,
+    pub downloaded: usize,
 }
 
 fn read_byte_from<T: Read>(stream: &mut T) -> Result<u8, std::io::Error> {
@@ -51,10 +55,6 @@ fn read_byte_from<T: Read>(stream: &mut T) -> Result<u8, std::io::Error> {
 }
 
 impl Connection {
-    pub fn received_keep_alive(&mut self) {
-        self.last_keep_alive = std::time::Instant::now();
-    }
-
     pub fn new_from_incoming(
         num_pieces: usize,
         stream: TcpStream,
@@ -83,11 +83,12 @@ impl Connection {
                 id: None,
             },
             read_some: None,
-            read_buffer: Vec::new(),
+            read_buffer: ReadBuffer::new(1 << 20), // 1 MiB
             send_buffer: Vec::new(),
             num_pieces,
             state: State::ReadingHandshake,
             conn_type: Type::Incoming,
+            downloaded: 0,
         }
     }
 
@@ -118,12 +119,17 @@ impl Connection {
             },
             info_hash,
             read_some: None,
-            read_buffer: Vec::new(),
+            read_buffer: ReadBuffer::new(1 << 20), // 1 MiB
             send_buffer: Vec::new(),
             num_pieces,
             state: State::Connecting,
             conn_type: Type::Outgoing,
+            downloaded: 0,
         }
+    }
+
+    pub fn deregister(&mut self, poll: &mut Poll) {
+        poll.registry().deregister(&mut self.stream).unwrap();
     }
 
     fn read(&mut self) -> UpdateResult {
@@ -131,14 +137,14 @@ impl Connection {
             v
         } else {
             const LENGTH_BYTE_SIZE: usize = 4;
-            let retval = self.read_exact_into_buffer(LENGTH_BYTE_SIZE);
-            match retval {
-                Ok(UpdateSuccess::Success) => {}
-                _ => return retval,
+            if !self
+                .read_buffer
+                .read_at_least_from(LENGTH_BYTE_SIZE, &mut self.stream)?
+            {
+                return Ok(UpdateSuccess::NoUpdate);
             }
-            let value: u32 = crate::messages::read_as_be(&mut &self.read_buffer[..]).unwrap();
-            self.read_buffer.clear();
-            value as usize
+            let value = crate::messages::read_as_be::<u32, _, _>(&mut self.read_buffer).unwrap();
+            value
         };
         self.read_some = Some(length);
         if length == 0 {
@@ -146,22 +152,23 @@ impl Connection {
             self.read_some = None;
             return msg.update(self);
         }
-        let retval = self.read_exact_into_buffer(length);
-        match retval {
-            Ok(UpdateSuccess::Success) => {}
-            _ => return retval,
+        if !self
+            .read_buffer
+            .read_at_least_from(length, &mut self.stream)?
+        {
+            return Ok(UpdateSuccess::NoUpdate);
         }
         let total_read = 4 + length;
-        let id = read_byte_from(&mut (&self.read_buffer[..]))? as i8;
+        let id = read_byte_from(&mut self.read_buffer)? as i8;
         macro_rules! dispatch_message ( // This is really neat!
             ($($A:ident),*) => (
                 match id {
                     Block::ID => {
-                        Block::read_and_update(&mut (&self.read_buffer[1..]), &mut self.block_manager, length)?;
+                        Block::read_and_update(&mut self.read_buffer, &mut self.block_manager, length)?;
                         Ok(UpdateSuccess::Success)
                     },
                     $($A::ID => {
-                        let msg = $A::read_from(&mut (&self.read_buffer[1..]), length)?;
+                        let msg = $A::read_from(&mut self.read_buffer, length)?;
                         msg.update(self)
                     })*
                     _ => Err(UpdateError::UnknownMessage{id}),
@@ -176,10 +183,11 @@ impl Connection {
             Have,
             Bitfield,
             Request,
-            Cancel
+            Cancel,
+            Port
         );
-        unsafe { self.read_buffer.set_len(0) }
         self.read_some = None;
+        self.downloaded += total_read;
         match retval {
             Ok(UpdateSuccess::Success) => Ok(UpdateSuccess::Transferred {
                 downloaded: total_read,
@@ -220,44 +228,24 @@ impl Connection {
         }
     }
 
-    fn read_exact_into_buffer(&mut self, length: usize) -> UpdateResult {
-        let prev_length = self.read_buffer.len();
-        let need_to_read = length - prev_length;
-        if length > self.read_buffer.capacity() {
-            const MAX_LENGTH: usize = crate::messages::BLOCK_SIZE * 20;
-            if length > MAX_LENGTH {
-                // Protect against nonsense data since we will size our buffer based on this
-                return Err(UpdateError::CommunicationError(
-                    std::io::ErrorKind::InvalidData.into(),
-                ));
-            }
-            self.read_buffer.resize(length, 0);
-        } else {
-            // Safe because of the above check
-            unsafe { self.read_buffer.set_len(length) }
-        }
-        let read = match self.stream.read(&mut self.read_buffer[prev_length..]) {
-            Ok(l) => l as usize,
-            Err(error) => {
-                if error.kind() == std::io::ErrorKind::WouldBlock {
-                    // Safe because prev_length < length
-                    unsafe { self.read_buffer.set_len(prev_length) }
-                    return Ok(UpdateSuccess::NoUpdate);
-                }
-                return Err(UpdateError::CommunicationError(error));
-            }
-        };
-        if read < need_to_read {
-            // Safe because prev_length + read < length
-            unsafe { self.read_buffer.set_len(prev_length + read) }
-            return Ok(UpdateSuccess::NoUpdate);
-        }
-        Ok(UpdateSuccess::Success)
+    pub fn received_keep_alive(&mut self) {
+        self.last_keep_alive = std::time::Instant::now();
+    }
+
+    pub fn register(&mut self, poll: &mut Poll, token: Token, interests: Interest) {
+        poll.registry()
+            .register(&mut self.stream, token, interests)
+            .unwrap();
+    }
+
+    pub fn reregister(&mut self, poll: &mut Poll, token: Token, interests: Interest) {
+        poll.registry()
+            .reregister(&mut self.stream, token, interests)
+            .unwrap();
     }
 
     // True: message was used
-    // False: message was not used
-    //
+    // False: message was dropped because of TCP pushback
     pub fn send<T: Message>(&mut self, message: &T) -> Result<bool, std::io::Error> {
         let mut result = false;
         if self.send_buffer.len() == 0 {
@@ -283,55 +271,63 @@ impl Connection {
 
     fn send_block_requests(&mut self) -> UpdateResult {
         if !self.peer_choking {
-            self.block_manager
-                .send_block_requests(&mut self.stream, &self.peer_has, self.id)?;
+            let sent = self.block_manager.send_block_requests(
+                &mut self.stream,
+                &self.peer_has,
+                self.id,
+            )?;
+            if sent == 0 {
+                return Ok(UpdateSuccess::NoUpdate);
+            }
             return Ok(UpdateSuccess::Success);
         }
         Ok(UpdateSuccess::NoUpdate)
     }
 
-    // Need to indicate the following:
-    //     - Error while updating, peer either is disconnected or needs to be disconnected
-    //     - There was no update to do (no new messages)
-    //     - Successfully did things, but no complete piece
-    //     - Successfully downloaded a full piece
     pub fn update(&mut self) -> UpdateResult {
         match self.state {
             State::Connected => {
-                let retval = self.read_all();
+                let read_result = self.read_all()?;
                 // Cancel requested Requests (TODO)
                 // Respond to Requests (TODO)
-                self.send_block_requests()?;
-                retval
+                debug!("Connection {} sending block requests", self.id);
+                let request_result = self.send_block_requests()?;
+                match (&read_result, request_result) {
+                    (UpdateSuccess::NoUpdate, UpdateSuccess::NoUpdate) => {
+                        Ok(UpdateSuccess::NoUpdate)
+                    }
+                    (UpdateSuccess::NoUpdate, UpdateSuccess::Success) => Ok(UpdateSuccess::Success),
+                    (_, _) => Ok(read_result),
+                }
             }
             State::Connecting => {
                 debug!("Connections for connection {}", self.id);
-                assert_eq!(self.read_buffer.len(), 0);
                 // Assumes update has been called because Poll indicated that this socket is now
                 // connected, or that connection has failed
                 use crate::messages;
-                let handshake_to_peer = messages::Handshake::new(crate::PEER_ID, &self.info_hash);
+                let handshake_to_peer = messages::Handshake::new(PEER_ID, &self.info_hash);
                 handshake_to_peer.write_to(&mut self.stream)?;
                 self.state = State::ReadingHandshake;
                 Ok(UpdateSuccess::Success)
             }
             State::ReadingHandshake => {
-                let retval = self.read_exact_into_buffer(Handshake::SIZE as usize);
-                match retval {
-                    Ok(UpdateSuccess::Success) => {}
-                    _ => return retval,
+                let length = Handshake::SIZE as usize;
+                if !self
+                    .read_buffer
+                    .read_at_least_from(length, &mut self.stream)?
+                {
+                    return Ok(UpdateSuccess::NoUpdate);
                 }
-                let handshake_from_peer = Handshake::read_from(&mut (&self.read_buffer[..]))?;
+                let handshake_from_peer = Handshake::read_from(&mut self.read_buffer)?;
                 debug!("Got handshake from peer {}", self.id);
-                if handshake_from_peer.peer_id == crate::PEER_ID.as_bytes() {
-                    // Avoid connecting to self
+                if handshake_from_peer.peer_id == PEER_ID.as_bytes() {
                     return Err(UpdateError::CommunicationError(
                         std::io::ErrorKind::AlreadyExists.into(),
                     ));
                 }
                 self.peer_info.id = Some(handshake_from_peer.peer_id.to_vec());
                 if let Type::Incoming = self.conn_type {
-                    let handshake_to_peer = Handshake::new(crate::PEER_ID, &self.info_hash);
+                    let handshake_to_peer = Handshake::new(PEER_ID, &self.info_hash);
                     handshake_to_peer.write_to(&mut self.stream)?;
                 }
                 let msg = Unchoke {};
@@ -339,8 +335,6 @@ impl Connection {
                 let msg = Interested {};
                 msg.write_to(&mut self.stream)?;
                 self.state = State::Connected;
-                self.read_buffer.resize(0, 0);
-                self.read_buffer.clear();
                 Ok(UpdateSuccess::Success)
             }
         }

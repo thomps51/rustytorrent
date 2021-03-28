@@ -3,15 +3,16 @@ use std::io::Read;
 use std::io::Write;
 
 use super::read_as_be;
+use super::to_u32_be;
 use super::Message;
 use super::MessageLength;
 use crate::connection::{Connection, UpdateResult, UpdateSuccess};
 
 #[derive(Debug, Clone)]
 pub struct Cancel {
-    index: u32,
-    begin: u32,
-    length: u32,
+    pub index: usize,
+    pub begin: usize,
+    pub length: usize,
 }
 
 impl Message for Cancel {
@@ -20,9 +21,9 @@ impl Message for Cancel {
     const NAME: &'static str = "Cancel";
 
     fn read_data<T: Read>(reader: &mut T, _: usize) -> Result<Self, Error> {
-        let index = read_as_be(reader)?;
-        let begin = read_as_be(reader)?;
-        let length = read_as_be(reader)?;
+        let index = read_as_be::<u32, _, _>(reader)?;
+        let begin = read_as_be::<u32, _, _>(reader)?;
+        let length = read_as_be::<u32, _, _>(reader)?;
         Ok(Cancel {
             index,
             begin,
@@ -36,9 +37,9 @@ impl Message for Cancel {
     }
 
     fn write_data<T: Write>(&self, writer: &mut T) -> Result<(), Error> {
-        writer.write_all(&self.index.to_be_bytes())?;
-        writer.write_all(&self.begin.to_be_bytes())?;
-        writer.write_all(&self.length.to_be_bytes())?;
+        writer.write_all(&to_u32_be(self.index))?;
+        writer.write_all(&to_u32_be(self.begin))?;
+        writer.write_all(&to_u32_be(self.length))?;
         Ok(())
     }
 }

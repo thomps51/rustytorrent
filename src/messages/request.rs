@@ -21,13 +21,13 @@ impl Message for Request {
     const NAME: &'static str = "Request";
 
     fn read_data<T: Read>(reader: &mut T, _: usize) -> Result<Self, Error> {
-        let index: u32 = read_as_be(reader)?;
-        let begin: u32 = read_as_be(reader)?;
-        let length: u32 = read_as_be(reader)?;
+        let index = read_as_be::<u32, _, _>(reader)?;
+        let begin = read_as_be::<u32, _, _>(reader)?;
+        let length = read_as_be::<u32, _, _>(reader)?;
         Ok(Request {
-            index: index as usize,
-            begin: begin as usize,
-            length: length as usize,
+            index,
+            begin,
+            length,
         })
     }
 
@@ -41,5 +41,11 @@ impl Message for Request {
         writer.write_all(&to_u32_be(self.begin))?;
         writer.write_all(&to_u32_be(self.length))?;
         Ok(())
+    }
+}
+
+impl Request {
+    pub fn get_block_index(&self) -> usize {
+        self.begin / crate::constants::BLOCK_LENGTH
     }
 }

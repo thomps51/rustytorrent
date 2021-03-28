@@ -19,16 +19,14 @@ impl Message for Have {
     const NAME: &'static str = "Have";
 
     fn read_data<T: Read>(reader: &mut T, _: usize) -> Result<Self, Error> {
-        let index: u32 = read_as_be(reader)?;
-        Ok(Have {
-            index: index as usize,
-        })
+        let index = read_as_be::<u32, _, _>(reader)?;
+        Ok(Have { index })
     }
     fn update(self, connection: &mut Connection) -> UpdateResult {
         if self.index as usize >= connection.peer_has.len() {
             return Err(UpdateError::IndexOutOfBounds);
         }
-        connection.peer_has.set(self.index as usize, true);
+        connection.peer_has.set(self.index, true);
         Ok(UpdateSuccess::Success)
     }
 

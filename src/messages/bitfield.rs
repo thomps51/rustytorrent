@@ -25,7 +25,7 @@ impl Message for Bitfield {
     fn read_data<T: Read>(reader: &mut T, length: usize) -> Result<Self, Error> {
         let mut buffer = Vec::new();
         let size = length - 1; // Subtract the ID byte
-        buffer.resize(size as usize, 0);
+        buffer.resize(size as _, 0);
         reader.read_exact(&mut buffer)?;
         Ok(Bitfield {
             bitfield: BitVec::from_bytes(&buffer),

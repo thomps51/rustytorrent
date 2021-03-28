@@ -23,7 +23,7 @@ use crate::SharedPieceStore;
 
 const LISTENER: Token = Token(std::usize::MAX);
 const LISTEN_PORT: u16 = 6881;
-const MAX_PEERS: usize = 30;
+const MAX_PEERS: usize = 60;
 const PRINT_UPDATE_TIME: std::time::Duration = std::time::Duration::from_secs(1);
 
 pub struct ConnectionManager {
@@ -82,8 +82,7 @@ impl ConnectionManager {
         let response = self.tracker.announce(&self.torrent, EventKind::Started)?;
         self.peer_list = response.peer_list;
         let mut events = Events::with_capacity(1024);
-        let mut listener =
-            TcpListener::bind(format!("10.0.0.2:{}", LISTEN_PORT).as_str().parse()?)?;
+        let mut listener = TcpListener::bind(format!("0.0.0.0:{}", LISTEN_PORT).as_str().parse()?)?;
         self.poll
             .registry()
             .register(&mut listener, LISTENER, Interest::READABLE)?;
@@ -100,7 +99,7 @@ impl ConnectionManager {
             for event in &events {
                 match event.token() {
                     LISTENER => self.accept_connections(&mut listener),
-                    token => self.handle_event(token, event),
+                    token => self.handle_event(token, Some(event)),
                 }
             }
             self.send_haves();
@@ -131,10 +130,7 @@ impl ConnectionManager {
                     );
                     let token = Token(self.next_socket_index);
                     self.next_socket_index += 1;
-                    self.poll
-                        .registry()
-                        .register(&mut peer.stream, token, Interest::READABLE)
-                        .unwrap();
+                    peer.register(&mut self.poll, token, Interest::READABLE);
                     self.connections.insert(token, peer);
                 }
                 Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -173,25 +169,21 @@ impl ConnectionManager {
             let token = Token(self.next_socket_index);
             self.next_socket_index += 1;
             // Registering the socket for Writable notifications will tell us when it is connected.
-            self.poll
-                .registry()
-                .register(&mut peer.stream, token, Interest::WRITABLE)
-                .unwrap();
+            peer.register(&mut self.poll, token, Interest::WRITABLE);
             self.connections.insert(token, peer);
         }
     }
 
     // Handle Poll event
-    fn handle_event(&mut self, token: Token, event: &Event) {
-        loop {
-            let peer = self.connections.get_mut(&token).unwrap();
-            if event.is_writable() {
+    fn handle_event(&mut self, token: Token, event: Option<&Event>) {
+        let peer = self.connections.get_mut(&token).unwrap();
+        if let Some(e) = event {
+            if e.is_writable() {
                 // Writable means it is now connected
-                self.poll
-                    .registry()
-                    .reregister(&mut peer.stream, token, Interest::READABLE)
-                    .unwrap();
+                peer.reregister(&mut self.poll, token, Interest::READABLE);
             }
+        }
+        loop {
             match peer.update() {
                 Ok(status) => {
                     if let UpdateSuccess::Transferred {
@@ -207,8 +199,8 @@ impl ConnectionManager {
                     }
                 }
                 Err(error) => {
-                    info!("Removing peer {}: {} while reading", token.0, error);
-                    self.poll.registry().deregister(&mut peer.stream).unwrap();
+                    info!("Removing peer {}: {} while updating", token.0, error);
+                    peer.deregister(&mut self.poll);
                     self.connections.remove(&token);
                     break;
                 }
@@ -222,13 +214,23 @@ impl ConnectionManager {
             let download_rate = (self.downloaded as f64) / ((1 << 20) as f64);
             self.downloaded = 0;
             self.uploaded = 0;
-
+            print!("{esc}[2J{esc}[1;1H", esc = 27 as char);
             print!(
-                "Percent done: {:.2}% Download: {:.2} MiB/s Peers: {}       \r",
+                "Percent done: {:.2}% Download: {:.2} MiB/s Peers: {}\n",
                 self.piece_store.borrow().percent_done(),
                 download_rate,
                 self.connections.len(),
             );
+            info!("Download: {:.2} MiB/s", download_rate);
+            let mut temp = Vec::new();
+            for (k, v) in self.connections.iter() {
+                temp.push((k, v));
+            }
+            temp.sort_by(|a, b| b.1.downloaded.cmp(&a.1.downloaded));
+            for (id, conn) in temp.iter().take(5) {
+                print!("Connection {}: {} bytes\n", id.0, conn.downloaded);
+            }
+
             use std::io::prelude::*;
             std::io::stdout()
                 .flush()
@@ -244,13 +246,13 @@ impl ConnectionManager {
     fn send_haves(&mut self) {
         while let Ok(have) = self.recv_have.try_recv() {
             let mut to_remove = Vec::new();
-            for (id, conn) in &mut self.connections {
-                if conn.peer_has[have.index] {
+            for (id, peer) in &mut self.connections {
+                if peer.peer_has[have.index] {
                     continue;
                 }
-                if let Err(error) = conn.send(&have) {
+                if let Err(error) = peer.send(&have) {
                     info!("Disconnecting peer {}: {} while sending", id.0, error);
-                    self.poll.registry().deregister(&mut conn.stream).unwrap();
+                    peer.deregister(&mut self.poll);
                     to_remove.push(*id);
                 }
             }

@@ -10,14 +10,18 @@ use slog::Drain;
 
 mod bencoding;
 mod block_manager;
+mod block_requester;
 mod connection;
 mod connection_manager;
+mod constants;
+mod endgame;
 mod hash;
+mod math;
 mod messages;
 mod meta_info;
 mod piece_assigner;
 mod piece_store;
-//mod read_buffer;
+mod read_buffer;
 mod torrent;
 mod tracker;
 
@@ -28,8 +32,6 @@ use torrent::Torrent;
 
 #[macro_use(slog_o)]
 extern crate slog;
-
-const PEER_ID: &'static str = "-QQ00010000000000000";
 
 type SharedPieceAssigner = Rc<RefCell<PieceAssigner>>;
 type SharedPieceStore = Rc<RefCell<FileSystem>>; // impl Trait syntax pls

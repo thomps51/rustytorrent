@@ -1,21 +1,19 @@
 use std::io::Error;
 use std::io::Read;
 use std::io::Write;
-use std::mem::MaybeUninit;
 
 use super::read_as_be;
 use super::to_u32_be;
 use super::Message;
 use super::MessageLength;
-use crate::connection::{Connection, UpdateResult, UpdateSuccess};
-
-pub const BLOCK_SIZE: usize = 1 << 14; // 16 KiB
+use crate::connection::{Connection, UpdateResult};
+use crate::constants::BLOCK_LENGTH;
 
 #[derive(Clone)]
 pub struct Block {
     pub index: usize,
     pub begin: usize,
-    pub block: [u8; BLOCK_SIZE],
+    pub block: [u8; BLOCK_LENGTH],
 }
 
 impl Message for Block {
@@ -27,28 +25,12 @@ impl Message for Block {
         9 + self.block.len()
     }
 
-    fn read_data<T: Read>(reader: &mut T, length: usize) -> Result<Self, Error> {
-        let index: u32 = read_as_be(reader)?;
-        let begin: u32 = read_as_be(reader)?;
-        // Idea: instead of reading into a temp stack array, change it so that we can read directly
-        // into the buffer we use for pieces.  This would avoid us having to pass this around and
-        // then copy it into that buffer.  This would be quite a change and make this message a
-        // special case.
-        let block: [MaybeUninit<u8>; BLOCK_SIZE] = unsafe { MaybeUninit::uninit().assume_init() };
-        let mut block = unsafe { std::mem::transmute::<_, [u8; BLOCK_SIZE]>(block) };
-        let size = length - 9; // id byte, 2 4-byte sizes
-        assert!(size <= BLOCK_SIZE);
-        reader.read_exact(&mut block)?;
-        Ok(Block {
-            index: index as usize,
-            begin: begin as usize,
-            block,
-        })
+    fn read_data<T: Read>(_: &mut T, _: usize) -> Result<Self, Error> {
+        panic!("read_and_update used instead");
     }
 
-    fn update(self, connection: &mut Connection) -> UpdateResult {
-        connection.block_manager.add_block(self);
-        Ok(UpdateSuccess::Success)
+    fn update(self, _: &mut Connection) -> UpdateResult {
+        panic!("read_and_update used instead");
     }
 
     fn write_data<T: Write>(&self, writer: &mut T) -> Result<(), Error> {
@@ -65,8 +47,8 @@ impl Block {
         block_manager: &mut crate::block_manager::BlockManager,
         length: usize,
     ) -> Result<(), Error> {
-        let index = read_as_be::<u32, T>(reader)? as usize;
-        let begin = read_as_be::<u32, T>(reader)? as usize;
+        let index = read_as_be::<u32, _, usize>(reader)?;
+        let begin = read_as_be::<u32, _, usize>(reader)?;
         let size = length - 9; // id byte, 2 4-byte sizes
         block_manager.add_block_fn(index, begin, size, |dst| {
             reader.read_exact(dst)?;

@@ -2,7 +2,7 @@ use std::io::Error;
 use std::io::Read;
 use std::io::Write;
 
-use log::debug;
+use log::{debug, info};
 
 use crate::connection::{Connection, UpdateResult};
 
@@ -46,7 +46,13 @@ pub trait Message: Sized {
     fn read_from<T: Read>(reader: &mut T, length: usize) -> Result<Self, Error> {
         if let MessageLength::Fixed(expected) = Self::SIZE {
             if expected != length {
-                panic!("Fixed-sized message received with wrong size");
+                info!(
+                    "Fixed-size message {} received with wrong size.  Expected: {}, Got: {}",
+                    Self::NAME,
+                    expected,
+                    length
+                );
+                return Err(std::io::ErrorKind::InvalidData.into());
             }
         }
         let message = Self::read_data(reader, length)?;

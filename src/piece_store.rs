@@ -11,11 +11,16 @@ use std::thread;
 use std::thread::JoinHandle;
 
 use bit_vec::BitVec;
-use log::{debug, warn};
+use log::{debug, info, warn};
+use rand::seq::SliceRandom;
+use rand::thread_rng;
 
 use crate::block_manager::{CompletedPiece, PieceInFlight};
+use crate::constants::BLOCK_LENGTH;
+use crate::endgame;
 use crate::hash::{self, Sha1Hash};
-use crate::messages::{Block, Have};
+use crate::math::get_block_info;
+use crate::messages::{Block, Cancel, Have, Request};
 use crate::meta_info::File;
 use crate::torrent::Torrent;
 
@@ -51,13 +56,13 @@ pub trait PieceStore: Sized {
     // Returns None if this PieceStore does not have the piece.
     fn get_piece(&self, index: usize) -> Option<Vec<u8>>;
 
+    fn get_block_have(&self, index: usize) -> BitVec;
+
     fn num_pieces(&self) -> usize;
 
     fn percent_done(&self) -> f64;
 
     fn verify_all_files(&self) -> bool;
-
-    fn write_block(&mut self, block: Block) -> Result<(), std::io::Error>;
 
     fn write(&mut self, piece: CompletedPiece) -> Result<(), std::io::Error>;
 }
@@ -67,13 +72,75 @@ pub type AllocatedFiles = HashMap<PathBuf, fs::File>;
 pub struct FileSystem {
     failed_hash: Sender<usize>,
     have_send: Sender<Have>,
-    info: Arc<FileSystemInfo>,
+    pub info: Arc<FileSystemInfo>,
     sender: Option<Sender<CompletedPiece>>,
     write_cache: HashMap<usize, PieceInFlight>,
     write_thread: Option<JoinHandle<()>>,
 }
 
 impl FileSystem {
+    pub fn endgame_reconcile(&self, sent: &mut HashMap<usize, BitVec>) -> (usize, Vec<Cancel>) {
+        endgame::reconcile(|x| self.get_block_have(x), sent)
+    }
+
+    pub fn get_incomplete_pieces(&self) -> Vec<usize> {
+        let mut result = Vec::new();
+        for (index, value) in self.info.have.iter().rev().enumerate() {
+            if !value.load(Ordering::Relaxed) {
+                result.push(index);
+            }
+        }
+        result
+    }
+
+    pub fn endgame_get_unreceived_blocks(&self) -> Vec<Request> {
+        let mut result = Vec::new();
+        info!(
+            "Endgame unreceived: Pieces in flight: {}",
+            self.write_cache.len()
+        );
+        for piece_in_flight in self.write_cache.values() {
+            for (index, have) in piece_in_flight.have.iter().enumerate() {
+                if !have {
+                    let (num_blocks, last_block_length) =
+                        get_block_info(self.get_piece_length(piece_in_flight.index));
+                    let block_length = if index == num_blocks - 1 {
+                        last_block_length
+                    } else {
+                        BLOCK_LENGTH
+                    };
+                    result.push(Request {
+                        index: piece_in_flight.index,
+                        begin: index * BLOCK_LENGTH,
+                        length: block_length,
+                    });
+                }
+            }
+        }
+        let mut incomplete = 0;
+        for (index, value) in self.info.have.iter().enumerate() {
+            if !value.load(Ordering::Relaxed) && !self.write_cache.contains_key(&index) {
+                incomplete += 1;
+                let (num_blocks, last_block_length) = get_block_info(self.get_piece_length(index));
+                for block_index in 0..num_blocks {
+                    let block_length = if block_index == num_blocks - 1 {
+                        last_block_length
+                    } else {
+                        BLOCK_LENGTH
+                    };
+                    result.push(Request {
+                        index: index,
+                        begin: block_index * BLOCK_LENGTH,
+                        length: block_length,
+                    });
+                }
+            }
+        }
+        info!("Endgame unreceived: Incomplete: {}", incomplete);
+        result.shuffle(&mut thread_rng());
+        result
+    }
+
     fn get_bytes(&self, index: usize, offset: usize, num_bytes: usize) -> Option<Vec<u8>> {
         if !self.info.have[index].load(Ordering::Relaxed) {
             return None;
@@ -125,11 +192,16 @@ impl FileSystem {
         func: F,
     ) -> Result<(), std::io::Error> {
         let piece_length = self.get_piece_length(index);
+        if self.info.have[index].load(Ordering::Relaxed) {
+            info!("Got block for already received piece");
+            return Ok(());
+        }
         let piece = self
             .write_cache
             .entry(index)
             .or_insert_with(|| PieceInFlight::new(piece_length, index));
         if let Ok(Some(completed)) = piece.add_block_fn(index, begin, length, func) {
+            info!("Saving piece {}", completed.index);
             self.write(completed)?;
             self.write_cache.remove(&index);
         }
@@ -195,14 +267,25 @@ impl PieceStore for FileSystem {
 
     // This should have a cache layer so we don't go to disk for each block
     fn get_block(&self, index: usize, offset: usize) -> Option<Vec<u8>> {
-        const BLOCK_SIZE: usize = 1 << 14; // 16 KiB
-        self.get_bytes(index, offset, BLOCK_SIZE)
+        self.get_bytes(index, offset, BLOCK_LENGTH)
     }
 
     // Returns None if we do not have that piece
     // This should have a cache layer so we don't go to disk everytime
     fn get_piece(&self, index: usize) -> Option<Vec<u8>> {
         self.get_bytes(index, 0, self.get_piece_length(index))
+    }
+    fn get_block_have(&self, index: usize) -> BitVec {
+        let piece_length = self.get_piece_length(index);
+        let (num_blocks, _) = crate::math::get_block_info(piece_length);
+        if self.info.have[index].load(Ordering::Relaxed) {
+            return BitVec::from_elem(num_blocks, true);
+        }
+        if let Some(value) = self.write_cache.get(&index) {
+            value.have.clone()
+        } else {
+            BitVec::from_elem(num_blocks, false)
+        }
     }
 
     fn have(&self) -> BitVec {
@@ -252,31 +335,18 @@ impl PieceStore for FileSystem {
         }
         Ok(())
     }
-
-    fn write_block(&mut self, block: Block) -> Result<(), std::io::Error> {
-        let piece_length = self.get_piece_length(block.index);
-        let piece = self
-            .write_cache
-            .entry(block.index)
-            .or_insert_with(|| PieceInFlight::new(piece_length, block.index));
-        if let Some(completed) = piece.add_block(&block) {
-            self.write(completed)?;
-            self.write_cache.remove(&block.index);
-        }
-        Ok(())
-    }
 }
 
 // Not the best name, but I need somewhere to collect the pieces that will be shared between threads
 // Should add any write errors here to be picked up later (since writes are asynchronous)
-struct FileSystemInfo {
+pub struct FileSystemInfo {
     piece_hashes: Vec<Sha1Hash>,
     files_info: Vec<File>,
     piece_length: usize,
     last_piece_length: usize,
     files: Mutex<AllocatedFiles>,
     have_count: AtomicUsize,
-    have: Vec<AtomicBool>,
+    pub have: Vec<AtomicBool>,
 }
 
 impl FileSystemInfo {

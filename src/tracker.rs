@@ -6,6 +6,7 @@ use log::{debug, info};
 use reqwest;
 
 use crate::bencoding;
+use crate::constants::PEER_ID;
 use crate::torrent::Torrent;
 
 pub struct Tracker {
@@ -53,11 +54,11 @@ impl Tracker {
         torrent: &Torrent,
         kind: EventKind,
     ) -> Result<TrackerResponse, Box<dyn Error>> {
-        debug_assert_eq!(crate::PEER_ID.len(), 20);
+        debug_assert_eq!(PEER_ID.len(), 20);
         let encoded = format!(
             "info_hash={}&peer_id={}&port={}&uploaded={}&downloaded={}&left={}&event={}",
             torrent.metainfo.info_hash_uri,
-            crate::PEER_ID,
+            PEER_ID,
             self.listen_port.to_string(),
             torrent.downloaded.to_string(),
             torrent.uploaded.to_string(),
@@ -96,9 +97,9 @@ impl Tracker {
                 let mut compact_peer_list: &[u8] = compact_peer_list;
                 while compact_peer_list.len() != 0 {
                     use crate::messages::read_as_be;
-                    let ip: u32 = read_as_be(&mut compact_peer_list).unwrap();
+                    let ip: u32 = read_as_be::<u32, _, _>(&mut compact_peer_list).unwrap();
                     let ip = Ipv4Addr::from(ip);
-                    let port = read_as_be(&mut compact_peer_list).unwrap();
+                    let port = read_as_be::<u16, _, _>(&mut compact_peer_list).unwrap();
                     let addr = SocketAddr::from((ip, port));
                     peer_list.push(PeerInfo { addr, id: None });
                 }
@@ -110,9 +111,9 @@ impl Tracker {
             let mut compact_peer_list = raw_v6_addrs.as_bytes().unwrap();
             while compact_peer_list.len() != 0 {
                 use crate::messages::read_as_be;
-                let ip: u128 = read_as_be(&mut compact_peer_list).unwrap();
+                let ip: u128 = read_as_be::<u128, _, _>(&mut compact_peer_list).unwrap();
                 let ip = Ipv6Addr::from(ip);
-                let port = read_as_be(&mut compact_peer_list).unwrap();
+                let port: u16 = read_as_be::<u16, _, _>(&mut compact_peer_list).unwrap();
                 let addr = SocketAddr::from((ip, port));
                 peer_list.push(PeerInfo { addr, id: None });
             }

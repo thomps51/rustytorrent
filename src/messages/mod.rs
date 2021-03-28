@@ -67,7 +67,7 @@ impl Message for Port {
     const NAME: &'static str = "Port";
 
     fn read_data<T: Read>(reader: &mut T, _: usize) -> Result<Self, Error> {
-        let listen_port = read_as_be(reader)?;
+        let listen_port = read_as_be::<u16, _, _>(reader)?;
         Ok(Port { listen_port })
     }
 
@@ -82,7 +82,7 @@ impl Message for Port {
     }
 }
 
-pub trait Primative: Sized {
+pub trait Primative: Sized + std::marker::Copy {
     fn from_be_bytes(array: &[u8]) -> Self;
 }
 
@@ -100,15 +100,26 @@ macro_rules! ImplPrimative {
 ImplPrimative!(u16);
 ImplPrimative!(u32);
 ImplPrimative!(u128);
-
-pub fn read_as_be<T: Primative, U: Read>(reader: &mut U) -> Result<T, Error> {
-    // Ideally we would use an array here, but until rust gets better const generic support and
-    // we are able to do [u8; std::mem::size_of<T>()] here, it's easier to resort to a dynamic
-    // allocation using Vec.
-    let mut buffer = Vec::new();
-    buffer.resize(std::mem::size_of::<T>(), 0);
-    reader.read_exact(&mut buffer)?;
-    Ok(T::from_be_bytes(&buffer))
+use num_traits::AsPrimitive;
+use num_traits::PrimInt;
+pub fn read_as_be<T: Primative + AsPrimitive<V>, U: Read, V: PrimInt + 'static>(
+    reader: &mut U,
+) -> Result<V, Error> {
+    // I don't understand why 'static is necessary.  Shouldn't PrimInt make it not a reference?
+    // Some how an immutable reference meets all that criteria.
+    //
+    // Ideally we would use an exact size array here, but until rust gets better const generic
+    // support and we are able to do [u8; std::mem::size_of::<T>()] here, it's easier to resort to
+    // using a max size.
+    let mut buffer = [0; 128 / 8];
+    let length = std::mem::size_of::<T>();
+    if length > buffer.len() {
+        panic!("Length too large! Only supports up to 128 bit types");
+    }
+    let slice = &mut buffer[0..length];
+    reader.read_exact(slice)?;
+    let result: V = T::from_be_bytes(slice).as_();
+    Ok(result)
 }
 
 pub fn to_u32_be(value: usize) -> [u8; 4] {
