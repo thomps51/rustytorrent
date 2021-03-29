@@ -10,7 +10,6 @@ use slog::Drain;
 
 mod bencoding;
 mod block_manager;
-mod block_requester;
 mod connection;
 mod connection_manager;
 mod constants;
@@ -21,7 +20,7 @@ mod messages;
 mod meta_info;
 mod piece_assigner;
 mod piece_store;
-mod read_buffer;
+pub mod read_buffer;
 mod torrent;
 mod tracker;
 

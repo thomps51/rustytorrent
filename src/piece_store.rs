@@ -20,14 +20,15 @@ use crate::constants::BLOCK_LENGTH;
 use crate::endgame;
 use crate::hash::{self, Sha1Hash};
 use crate::math::get_block_info;
-use crate::messages::{Block, Cancel, Have, Request};
+use crate::messages::{Cancel, Have, Request};
 use crate::meta_info::File;
 use crate::torrent::Torrent;
 
 // Struct that represents a "store" that writes pieces to file and has the current state of the
-// download
+// download.
 // Maybe can have different "stores", the main one writes to the file system but you can also
-// write to network drive, ftp (which would involve more caching in memory to avoid transit delays), etc.
+// write to network drive, ftp (which would involve more caching in memory to avoid transit delays),
+// etc.
 
 pub trait PieceStore: Sized {
     // Create a new PieceStore for torrent.
@@ -81,16 +82,6 @@ pub struct FileSystem {
 impl FileSystem {
     pub fn endgame_reconcile(&self, sent: &mut HashMap<usize, BitVec>) -> (usize, Vec<Cancel>) {
         endgame::reconcile(|x| self.get_block_have(x), sent)
-    }
-
-    pub fn get_incomplete_pieces(&self) -> Vec<usize> {
-        let mut result = Vec::new();
-        for (index, value) in self.info.have.iter().rev().enumerate() {
-            if !value.load(Ordering::Relaxed) {
-                result.push(index);
-            }
-        }
-        result
     }
 
     pub fn endgame_get_unreceived_blocks(&self) -> Vec<Request> {

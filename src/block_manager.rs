@@ -4,10 +4,7 @@ use std::io::prelude::*;
 use bit_vec::BitVec;
 use log::{debug, info};
 
-use crate::block_requester::BlockAssigner;
-use crate::constants::BLOCK_LENGTH;
 use crate::messages::*;
-use crate::piece_store::PieceStore;
 use crate::SharedPieceAssigner;
 use crate::SharedPieceStore;
 
@@ -38,7 +35,6 @@ pub struct BlockManager {
     blocks_in_flight: usize,
     piece_assigner: SharedPieceAssigner,
     piece_store: SharedPieceStore,
-    pub block_requester: Option<BlockAssigner>,
     endgame_sent_blocks: HashMap<usize, BitVec>,
 }
 
@@ -48,7 +44,6 @@ impl BlockManager {
             blocks_in_flight: 0,
             piece_assigner,
             piece_store,
-            block_requester: None,
             endgame_sent_blocks: HashMap::new(),
         }
     }
@@ -64,14 +59,6 @@ impl BlockManager {
         self.piece_store
             .borrow_mut()
             .write_block_fn(index, begin, length, func)?;
-        if let Some(current) = &self.block_requester {
-            if current.is_endgame() {
-                if let Some(block_requests_sent) = self.endgame_sent_blocks.get_mut(&index) {
-                    let block_index = begin / BLOCK_LENGTH;
-                    block_requests_sent.set(block_index, false);
-                }
-            }
-        }
         Ok(())
     }
 
@@ -83,7 +70,7 @@ impl BlockManager {
     ) -> Result<usize, std::io::Error> {
         let mut sent = 0;
         let mut piece_assigner = self.piece_assigner.borrow_mut();
-        if let crate::block_requester::Mode::Endgame = piece_assigner.mode {
+        if let crate::piece_assigner::Mode::Endgame = piece_assigner.mode {
             let (blocks_in_flight, cancels) = self
                 .piece_store
                 .borrow()
@@ -105,7 +92,7 @@ impl BlockManager {
                 || self.piece_store.borrow().endgame_get_unreceived_blocks(),
                 id,
             ) {
-                if piece_assigner.mode == crate::block_requester::Mode::Endgame {
+                if piece_assigner.mode == crate::piece_assigner::Mode::Endgame {
                     self.endgame_sent_blocks
                         .entry(request.index)
                         .or_insert(BitVec::from_elem(block_info.num_blocks, false))
