@@ -17,7 +17,8 @@ use crate::SharedPieceStore;
 pub enum State {
     Connecting,
     ReadingHandshake,
-    Connected,
+    ConnectedNormal,
+    ConnectedEndgame,
 }
 
 enum Type {
@@ -28,22 +29,22 @@ enum Type {
 pub struct Connection {
     am_choking: bool,
     am_interested: bool,
-    id: usize,
+    pub id: usize,
     pub peer_choking: bool,
     pub peer_interested: bool,
     pub peer_has: BitVec,
-    stream: TcpStream,
+    pub stream: TcpStream,
     last_keep_alive: std::time::Instant,
-    block_manager: BlockManager,
+    pub block_manager: BlockManager,
     info_hash: Sha1Hash,
     pub pending_peer_requests: Vec<Request>,
     pub pending_peer_cancels: Vec<Cancel>,
     peer_info: PeerInfo,
-    read_some: Option<usize>,
-    read_buffer: ReadBuffer,
+    pub next_message_length: Option<usize>,
+    pub read_buffer: ReadBuffer,
     send_buffer: Vec<u8>,
     pub num_pieces: usize,
-    state: State,
+    pub state: State,
     conn_type: Type,
     pub downloaded: usize,
 }
@@ -82,7 +83,7 @@ impl Connection {
                 addr: addr,
                 id: None,
             },
-            read_some: None,
+            next_message_length: None,
             read_buffer: ReadBuffer::new(1 << 20), // 1 MiB
             send_buffer: Vec::new(),
             num_pieces,
@@ -118,7 +119,7 @@ impl Connection {
                 id: None,
             },
             info_hash,
-            read_some: None,
+            next_message_length: None,
             read_buffer: ReadBuffer::new(1 << 20), // 1 MiB
             send_buffer: Vec::new(),
             num_pieces,
@@ -133,23 +134,23 @@ impl Connection {
     }
 
     fn read(&mut self) -> UpdateResult {
-        let length = if let Some(v) = self.read_some {
+        const LENGTH_BYTE_SIZE: usize = 4;
+        let length = if let Some(v) = self.next_message_length {
             v
         } else {
-            const LENGTH_BYTE_SIZE: usize = 4;
             if !self
                 .read_buffer
                 .read_at_least_from(LENGTH_BYTE_SIZE, &mut self.stream)?
             {
                 return Ok(UpdateSuccess::NoUpdate);
             }
-            let value = crate::messages::read_as_be::<u32, _, _>(&mut self.read_buffer).unwrap();
+            let value = read_as_be::<u32, _, _>(&mut self.read_buffer).unwrap();
             value
         };
-        self.read_some = Some(length);
+        self.next_message_length = Some(length);
         if length == 0 {
             let msg = KeepAlive {};
-            self.read_some = None;
+            self.next_message_length = None;
             return msg.update(self);
         }
         if !self
@@ -158,7 +159,7 @@ impl Connection {
         {
             return Ok(UpdateSuccess::NoUpdate);
         }
-        let total_read = 4 + length;
+        let total_read = LENGTH_BYTE_SIZE + length;
         let id = read_byte_from(&mut self.read_buffer)? as i8;
         macro_rules! dispatch_message ( // This is really neat!
             ($($A:ident),*) => (
@@ -186,7 +187,7 @@ impl Connection {
             Cancel,
             Port
         );
-        self.read_some = None;
+        self.next_message_length = None;
         self.downloaded += total_read;
         match retval {
             Ok(UpdateSuccess::Success) => Ok(UpdateSuccess::Transferred {
@@ -266,6 +267,7 @@ impl Connection {
                 }
             }
         }
+        //self.stream.flush()?;
         Ok(result)
     }
 
@@ -286,10 +288,20 @@ impl Connection {
 
     pub fn update(&mut self) -> UpdateResult {
         match self.state {
-            State::Connected => {
+            State::ConnectedEndgame => {
                 let read_result = self.read_all()?;
                 // Cancel requested Requests (TODO)
                 // Respond to Requests (TODO)
+                return Ok(read_result);
+            }
+            State::ConnectedNormal => {
+                let read_result = self.read_all()?;
+                // Cancel requested Requests (TODO)
+                // Respond to Requests (TODO)
+                if self.block_manager.piece_assigner.borrow().is_endgame() {
+                    self.state = State::ConnectedEndgame;
+                    return Ok(read_result);
+                }
                 debug!("Connection {} sending block requests", self.id);
                 let request_result = self.send_block_requests()?;
                 match (&read_result, request_result) {
@@ -334,7 +346,7 @@ impl Connection {
                 msg.write_to(&mut self.stream)?;
                 let msg = Interested {};
                 msg.write_to(&mut self.stream)?;
-                self.state = State::Connected;
+                self.state = State::ConnectedNormal;
                 Ok(UpdateSuccess::Success)
             }
         }

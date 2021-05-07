@@ -79,7 +79,7 @@ impl ReadBuffer {
             self.shift();
         }
         let read = match self.read_from(reader) {
-            Ok(l) => l as usize,
+            Ok(l) => l,
             Err(error) => {
                 if error.kind() == std::io::ErrorKind::WouldBlock {
                     return Ok(false);

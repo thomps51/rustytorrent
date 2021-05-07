@@ -69,7 +69,7 @@ pub trait Message: Sized {
 
     // Unlike ReadFrom, we don't know which particular message we have when we want
     fn write_to<T: Write>(&self, writer: &mut T) -> Result<(), Error> {
-        debug!("Writing message of type: {}", Self::NAME);
+        // debug!("Writing message of type: {}", Self::NAME);
         writer.write_all(&self.length_be_bytes())?;
         writer.write_all(&[Self::ID as u8])?;
         self.write_data(writer)?;

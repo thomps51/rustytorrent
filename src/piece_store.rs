@@ -1,3 +1,4 @@
+use std::collections::hash_map::Entry::Occupied;
 use std::collections::HashMap;
 use std::error::Error;
 use std::fs;
@@ -12,19 +13,16 @@ use std::thread::JoinHandle;
 
 use bit_vec::BitVec;
 use log::{debug, info, warn};
-use rand::seq::SliceRandom;
-use rand::thread_rng;
 
-use crate::block_manager::{CompletedPiece, PieceInFlight};
 use crate::constants::BLOCK_LENGTH;
 use crate::endgame;
 use crate::hash::{self, Sha1Hash};
-use crate::math::get_block_info;
-use crate::messages::{Cancel, Have, Request};
+use crate::messages::{BlockData, Cancel, Have, Request};
 use crate::meta_info::File;
+use crate::piece_info::PieceInfo;
 use crate::torrent::Torrent;
 
-// Struct that represents a "store" that writes pieces to file and has the current state of the
+// Trait that represents a "store" that writes pieces to file and has the current state of the
 // download.
 // Maybe can have different "stores", the main one writes to the file system but you can also
 // write to network drive, ftp (which would involve more caching in memory to avoid transit delays),
@@ -34,7 +32,8 @@ pub trait PieceStore: Sized {
     // Create a new PieceStore for torrent.
     fn new(
         torrent: &Torrent,
-        failed_hash: Sender<usize>,
+        piece_info: PieceInfo,
+        failed_hash: Sender<(usize, usize)>,
         have_send: Sender<Have>,
     ) -> Result<Self, Box<dyn Error>>;
 
@@ -71,9 +70,11 @@ pub trait PieceStore: Sized {
 pub type AllocatedFiles = HashMap<PathBuf, fs::File>;
 
 pub struct FileSystem {
-    failed_hash: Sender<usize>,
+    failed_hash: Sender<(usize, usize)>,
     have_send: Sender<Have>,
+    snapshot_blocks_received: usize,
     pub info: Arc<FileSystemInfo>,
+    piece_info: PieceInfo,
     sender: Option<Sender<CompletedPiece>>,
     write_cache: HashMap<usize, PieceInFlight>,
     write_thread: Option<JoinHandle<()>>,
@@ -81,9 +82,10 @@ pub struct FileSystem {
 
 impl FileSystem {
     pub fn endgame_reconcile(&self, sent: &mut HashMap<usize, BitVec>) -> (usize, Vec<Cancel>) {
-        endgame::reconcile(|x| self.get_block_have(x), sent)
+        endgame::reconcile(|x| self.get_block_have(x), self.have(), sent)
     }
 
+    // Vec<(PieceIndex, BlockIndex)>, Vec<PieceIndex>
     pub fn endgame_get_unreceived_blocks(&self) -> Vec<Request> {
         let mut result = Vec::new();
         info!(
@@ -91,44 +93,25 @@ impl FileSystem {
             self.write_cache.len()
         );
         for piece_in_flight in self.write_cache.values() {
-            for (index, have) in piece_in_flight.have.iter().enumerate() {
+            for (block_index, have) in piece_in_flight.have.iter().enumerate() {
                 if !have {
-                    let (num_blocks, last_block_length) =
-                        get_block_info(self.get_piece_length(piece_in_flight.index));
-                    let block_length = if index == num_blocks - 1 {
-                        last_block_length
-                    } else {
-                        BLOCK_LENGTH
-                    };
-                    result.push(Request {
-                        index: piece_in_flight.index,
-                        begin: index * BLOCK_LENGTH,
-                        length: block_length,
-                    });
+                    result.push(Request::new(
+                        block_index,
+                        piece_in_flight.index,
+                        self.piece_info,
+                    ));
                 }
             }
         }
-        let mut incomplete = 0;
-        for (index, value) in self.info.have.iter().enumerate() {
-            if !value.load(Ordering::Relaxed) && !self.write_cache.contains_key(&index) {
-                incomplete += 1;
-                let (num_blocks, last_block_length) = get_block_info(self.get_piece_length(index));
-                for block_index in 0..num_blocks {
-                    let block_length = if block_index == num_blocks - 1 {
-                        last_block_length
-                    } else {
-                        BLOCK_LENGTH
-                    };
-                    result.push(Request {
-                        index: index,
-                        begin: block_index * BLOCK_LENGTH,
-                        length: block_length,
-                    });
+        for (piece_index, value) in self.info.have.iter().enumerate() {
+            if !value.load(Ordering::Relaxed) && !self.write_cache.contains_key(&piece_index) {
+                for block_index in 0..self.piece_info.get_num_blocks(piece_index) {
+                    result.push(Request::new(block_index, piece_index, self.piece_info));
                 }
             }
         }
-        info!("Endgame unreceived: Incomplete: {}", incomplete);
-        result.shuffle(&mut thread_rng());
+        result.sort();
+        result.reverse();
         result
     }
 
@@ -175,24 +158,37 @@ impl FileSystem {
         }
     }
 
-    pub fn write_block_fn<F: FnOnce(&mut [u8]) -> Result<(), std::io::Error>>(
+    pub fn snapshot_blocks_received(&mut self) -> usize {
+        let result = self.snapshot_blocks_received;
+        self.snapshot_blocks_received = 0;
+        return result;
+    }
+    pub fn write_block<T: Read>(
         &mut self,
         index: usize,
         begin: usize,
         length: usize,
-        func: F,
+        data: BlockData<T>,
     ) -> Result<(), std::io::Error> {
-        let piece_length = self.get_piece_length(index);
         if self.info.have[index].load(Ordering::Relaxed) {
             info!("Got block for already received piece");
             return Ok(());
         }
+        if let Occupied(value) = self.write_cache.entry(index) {
+            if value.get().have[begin / BLOCK_LENGTH] {
+                info!(
+                    "Got block that has already been received: index: {}, begin: {}",
+                    index, begin
+                );
+            }
+        }
+        self.snapshot_blocks_received += 1;
+        let piece_info = self.piece_info;
         let piece = self
             .write_cache
             .entry(index)
-            .or_insert_with(|| PieceInFlight::new(piece_length, index));
-        if let Ok(Some(completed)) = piece.add_block_fn(index, begin, length, func) {
-            info!("Saving piece {}", completed.index);
+            .or_insert_with(|| PieceInFlight::new(index, piece_info));
+        if let Ok(Some(completed)) = piece.add_block(index, begin, length, data) {
             self.write(completed)?;
             self.write_cache.remove(&index);
         }
@@ -203,7 +199,8 @@ impl FileSystem {
 impl PieceStore for FileSystem {
     fn new(
         torrent: &Torrent,
-        failed_hash: Sender<usize>,
+        piece_info: PieceInfo,
+        failed_hash: Sender<(usize, usize)>,
         have_send: Sender<Have>,
     ) -> Result<Self, Box<dyn Error>> {
         let mut allocated_files = AllocatedFiles::new();
@@ -246,6 +243,8 @@ impl PieceStore for FileSystem {
             failed_hash,
             have_send,
             info,
+            piece_info,
+            snapshot_blocks_received: 0,
             sender: None,
             write_thread: None,
             write_cache: HashMap::new(),
@@ -267,8 +266,7 @@ impl PieceStore for FileSystem {
         self.get_bytes(index, 0, self.get_piece_length(index))
     }
     fn get_block_have(&self, index: usize) -> BitVec {
-        let piece_length = self.get_piece_length(index);
-        let (num_blocks, _) = crate::math::get_block_info(piece_length);
+        let num_blocks = self.piece_info.get_num_blocks(index);
         if self.info.have[index].load(Ordering::Relaxed) {
             return BitVec::from_elem(num_blocks, true);
         }
@@ -343,7 +341,7 @@ pub struct FileSystemInfo {
 impl FileSystemInfo {
     fn write(
         &self,
-        failed_hash: &mut Sender<usize>,
+        failed_hash: &mut Sender<(usize, usize)>,
         have_send: &mut Sender<Have>,
         piece: CompletedPiece,
     ) {
@@ -353,7 +351,7 @@ impl FileSystemInfo {
         debug!("Writing piece {} to disk", piece.index);
         if !is_valid_piece(&piece.piece, piece.index, &self.piece_hashes) {
             warn!("Piece {} has invalid hash", piece.index);
-            failed_hash.send(piece.index).unwrap();
+            failed_hash.send((piece.index, piece.piece.len())).unwrap();
             return;
         }
         let piece_begin_byte = piece.index * self.piece_length;
@@ -399,4 +397,76 @@ fn is_valid_piece(piece: &[u8], index: usize, piece_hashes: &Vec<Sha1Hash>) -> b
     let actual = hash::hash_to_bytes(piece);
     let expected = piece_hashes[index];
     actual == expected
+}
+
+#[derive(Debug)]
+pub struct CompletedPiece {
+    pub index: usize,
+    pub piece: Vec<u8>,
+}
+
+#[derive(Debug)]
+pub struct PieceInFlight {
+    pub index: usize,
+    piece: Vec<u8>,
+    pub have: BitVec,
+    piece_info: PieceInfo,
+    blocks_received: usize,
+}
+
+impl PieceInFlight {
+    pub fn new(index: usize, piece_info: PieceInfo) -> PieceInFlight {
+        let length = piece_info.get_piece_length(index);
+        let mut piece = Vec::new();
+        piece.reserve(length);
+        unsafe { piece.set_len(length) }
+        let num_blocks = piece_info.get_num_blocks(index);
+        let have = BitVec::from_elem(num_blocks, false);
+        PieceInFlight {
+            index,
+            piece,
+            have,
+            piece_info,
+            blocks_received: 0,
+        }
+    }
+
+    pub fn add_block<T: Read>(
+        &mut self,
+        index: usize,
+        begin: usize,
+        length: usize,
+        mut data: BlockData<T>,
+    ) -> Result<Option<CompletedPiece>, std::io::Error> {
+        // TODO (tonyt): These shouldn't be panics, since they may happen in normal use
+        debug_assert!(index == self.index);
+        debug_assert!(self.piece.len() != 0);
+        if begin % BLOCK_LENGTH != 0 {
+            panic!("Error! Begin is in between blocks!");
+        }
+        let block_index = begin / BLOCK_LENGTH;
+        if block_index >= self.have.len() {
+            panic!("Error! Out of range");
+        }
+        if self.have[block_index] {
+            return Ok(None);
+        }
+        let block_length = self.piece_info.get_block_length(block_index, self.index);
+        if block_length != length {
+            panic!("Error in block length");
+        }
+        self.blocks_received += 1;
+        let end = begin + length;
+        data.read(&mut self.piece[begin..end])?;
+        self.have.set(block_index, true);
+        if self.blocks_received == self.have.len() {
+            debug!("Got piece {}", self.index);
+            Ok(Some(CompletedPiece {
+                index: self.index,
+                piece: std::mem::replace(&mut self.piece, Vec::new()),
+            }))
+        } else {
+            Ok(None)
+        }
+    }
 }

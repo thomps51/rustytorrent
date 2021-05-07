@@ -7,12 +7,14 @@ use super::to_u32_be;
 use super::Message;
 use super::MessageLength;
 use crate::connection::{Connection, UpdateResult, UpdateSuccess};
+use crate::constants::BLOCK_LENGTH;
+use crate::piece_info::PieceInfo;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord)]
 pub struct Request {
-    pub index: usize,
-    pub begin: usize,
-    pub length: usize,
+    index: usize,
+    begin: usize,
+    length: usize,
 }
 
 impl Message for Request {
@@ -45,7 +47,18 @@ impl Message for Request {
 }
 
 impl Request {
-    pub fn get_block_index(&self) -> usize {
-        self.begin / crate::constants::BLOCK_LENGTH
+    pub fn new(block_index: usize, piece_index: usize, piece_info: PieceInfo) -> Self {
+        Request {
+            index: piece_index,
+            begin: block_index * BLOCK_LENGTH,
+            length: piece_info.get_block_length(block_index, piece_index),
+        }
+    }
+
+    pub fn block_index(&self) -> usize {
+        self.begin / BLOCK_LENGTH
+    }
+    pub fn piece_index(&self) -> usize {
+        self.index
     }
 }

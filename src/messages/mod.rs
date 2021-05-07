@@ -1,6 +1,3 @@
-// TODO: change some of the panics to errors and propagate them up: they should result in
-// disconnect and banning of peers.
-
 pub mod message;
 pub use message::*;
 
@@ -30,6 +27,8 @@ use std::io::Error;
 use std::io::Read;
 use std::io::Write;
 
+use log::info;
+
 macro_rules! ImplSingleByteMessage {
     ($NAME:ident, $ID:literal, $Flag:ident, $Value:literal) => {
         #[derive(Debug, Clone)]
@@ -37,11 +36,16 @@ macro_rules! ImplSingleByteMessage {
 
         impl Message for $NAME {
             const ID: i8 = $ID;
-            const SIZE: MessageLength = MessageLength::Fixed(1);
+            const SIZE: MessageLength = MessageLength::Fixed(1); // id
             const NAME: &'static str = stringify!($NAME);
 
             fn update(self, connection: &mut Connection) -> UpdateResult {
                 connection.$Flag = $Value;
+                info!(
+                    "Connection {} received message {}",
+                    connection.id,
+                    Self::NAME,
+                );
                 Ok(UpdateSuccess::Success)
             }
 
@@ -97,6 +101,7 @@ macro_rules! ImplPrimative {
     };
 }
 
+ImplPrimative!(u8);
 ImplPrimative!(u16);
 ImplPrimative!(u32);
 ImplPrimative!(u128);
