@@ -17,7 +17,7 @@ use log::{debug, info, warn};
 use crate::constants::BLOCK_LENGTH;
 use crate::endgame;
 use crate::hash::{self, Sha1Hash};
-use crate::messages::{BlockData, Cancel, Have, Request};
+use crate::messages::{BlockReader, Cancel, Have, Request};
 use crate::meta_info::File;
 use crate::piece_info::PieceInfo;
 use crate::torrent::Torrent;
@@ -163,22 +163,19 @@ impl FileSystem {
         self.snapshot_blocks_received = 0;
         return result;
     }
-    pub fn write_block<T: Read>(
-        &mut self,
-        index: usize,
-        begin: usize,
-        length: usize,
-        data: BlockData<T>,
-    ) -> Result<(), std::io::Error> {
-        if self.info.have[index].load(Ordering::Relaxed) {
+
+    pub fn write_block<T: Read>(&mut self, block: BlockReader<T>) -> Result<(), std::io::Error> {
+        let piece_index = block.piece_index();
+        if self.info.have[piece_index].load(Ordering::Relaxed) {
             info!("Got block for already received piece");
             return Ok(());
         }
-        if let Occupied(value) = self.write_cache.entry(index) {
-            if value.get().have[begin / BLOCK_LENGTH] {
+        if let Occupied(value) = self.write_cache.entry(piece_index) {
+            if value.get().have[block.block_index()] {
                 info!(
-                    "Got block that has already been received: index: {}, begin: {}",
-                    index, begin
+                    "Got block that has already been received: piece_index: {}, block_index: {}",
+                    piece_index,
+                    block.block_index()
                 );
             }
         }
@@ -186,11 +183,11 @@ impl FileSystem {
         let piece_info = self.piece_info;
         let piece = self
             .write_cache
-            .entry(index)
-            .or_insert_with(|| PieceInFlight::new(index, piece_info));
-        if let Ok(Some(completed)) = piece.add_block(index, begin, length, data) {
+            .entry(block.piece_index())
+            .or_insert_with(|| PieceInFlight::new(block.piece_index(), piece_info));
+        if let Ok(Some(completed)) = piece.add_block(block) {
             self.write(completed)?;
-            self.write_cache.remove(&index);
+            self.write_cache.remove(&piece_index);
         }
         Ok(())
     }
@@ -433,32 +430,27 @@ impl PieceInFlight {
 
     pub fn add_block<T: Read>(
         &mut self,
-        index: usize,
-        begin: usize,
-        length: usize,
-        mut data: BlockData<T>,
+        mut block: BlockReader<T>,
     ) -> Result<Option<CompletedPiece>, std::io::Error> {
         // TODO (tonyt): These shouldn't be panics, since they may happen in normal use
-        debug_assert!(index == self.index);
+        debug_assert!(block.piece_index() == self.index);
         debug_assert!(self.piece.len() != 0);
-        if begin % BLOCK_LENGTH != 0 {
-            panic!("Error! Begin is in between blocks!");
-        }
-        let block_index = begin / BLOCK_LENGTH;
-        if block_index >= self.have.len() {
+        if block.block_index() >= self.have.len() {
             panic!("Error! Out of range");
         }
-        if self.have[block_index] {
+        if self.have[block.block_index()] {
             return Ok(None);
         }
-        let block_length = self.piece_info.get_block_length(block_index, self.index);
-        if block_length != length {
+        let block_length = self
+            .piece_info
+            .get_block_length(block.block_index(), self.index);
+        if block_length != block.len() {
             panic!("Error in block length");
         }
         self.blocks_received += 1;
-        let end = begin + length;
-        data.read(&mut self.piece[begin..end])?;
-        self.have.set(block_index, true);
+        let end = block.begin() + block.len();
+        block.read(&mut self.piece[block.begin()..end])?;
+        self.have.set(block.block_index(), true);
         if self.blocks_received == self.have.len() {
             debug!("Got piece {}", self.index);
             Ok(Some(CompletedPiece {

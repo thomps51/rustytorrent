@@ -292,9 +292,7 @@ impl ConnectionManager {
             self.downloaded = 0;
             self.uploaded = 0;
             print!("{esc}[2J{esc}[1;1H", esc = 27 as char);
-
             let have = self.piece_store.borrow().have();
-
             let ticks = 200;
             let pieces_per_tick = have.len() / ticks;
             let mut progress_bar = String::with_capacity(ticks);
@@ -306,13 +304,9 @@ impl ConnectionManager {
                     progress_bar.push('X');
                 } else {
                     progress_bar.push('_');
-                    // print!("start_index: {}", start_index);
-                    // print!(" section length: {}", section.len());
-                    // print!(" value: {:?}\n", section);
                 }
             }
             print!("{}\n", progress_bar);
-
             print!(
                 "Percent done: {:.2}% Download: {:.2} MiB/s Peers: {}\n",
                 self.piece_store.borrow().percent_done(),
@@ -328,22 +322,12 @@ impl ConnectionManager {
             for (id, conn) in temp.iter().take(5) {
                 print!("Connection {}: {} bytes\n", id.0, conn.downloaded);
             }
-
             use std::io::prelude::*;
             std::io::stdout()
                 .flush()
                 .ok()
                 .expect("Could not flush stdout");
             self.last_update = now;
-            for (k, v) in self.connections.iter() {
-                info!(
-                    "Connection {} next_message_length: {:?}, unread: {}, unused: {}",
-                    k.0,
-                    v.next_message_length,
-                    v.read_buffer.unread(),
-                    v.read_buffer.unused(),
-                );
-            }
         }
     }
 

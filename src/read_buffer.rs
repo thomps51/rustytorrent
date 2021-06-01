@@ -65,6 +65,11 @@ impl ReadBuffer {
         Ok(read)
     }
 
+    // If there is already length in the buffer, returns true.  Otherwise attempts to read from
+    // reader into self, and returns whether there are length bytes in the buffer after reading.
+    //
+    // If an error other than std::io::ErrorKind::WouldBlock is produced when reading, it is
+    // returned.
     pub fn read_at_least_from<T: std::io::Read>(
         &mut self,
         length: usize,

@@ -7,6 +7,7 @@ use super::to_u32_be;
 use super::Message;
 use super::MessageLength;
 use crate::connection::{Connection, UpdateResult};
+use crate::constants::BLOCK_LENGTH;
 
 #[derive(Clone)]
 pub struct Block {
@@ -15,17 +16,19 @@ pub struct Block {
     block: Vec<u8>,
 }
 
-// BlockData makes sure that the data from the Block message is read from the read buffer.  It does
+// BlockReader makes sure that the data from the Block message is read from the read buffer.  It does
 // this by enforcing that read() is called exactly once, either by the user or when the object is
 // dropped.
 //
 // Originally this was just handled by a callback, but it was one of the most time consuming bugs to
 // track down when it was not being called when a block had already been received, leaving the data
 // in the read buffer to be interpreted as a new message.
-pub struct BlockData<'a, T: Read> {
+pub struct BlockReader<'a, T: Read> {
+    begin: usize,
     called: bool,
-    reader: &'a mut T,
+    index: usize,
     length: usize,
+    reader: &'a mut T,
 }
 
 impl Message for Block {
@@ -64,29 +67,48 @@ impl Block {
         let index = read_as_be::<u32, _, usize>(reader)?;
         let begin = read_as_be::<u32, _, usize>(reader)?;
         let size = length - 9; // id byte, 2 4-byte sizes
-        block_manager.add_block(index, begin, size, BlockData::new(reader, size))?;
+        block_manager.add_block(BlockReader::new(reader, begin, index, size))?;
         Ok(())
     }
 }
 
-impl<'a, T: Read> BlockData<'a, T> {
-    pub fn new(reader: &'a mut T, length: usize) -> Self {
-        BlockData {
+impl<'a, T: Read> BlockReader<'a, T> {
+    pub fn new(reader: &'a mut T, begin: usize, index: usize, length: usize) -> Self {
+        BlockReader {
             called: false,
             reader,
             length,
+            index,
+            begin,
         }
     }
 
     pub fn read(&mut self, dst: &mut [u8]) -> Result<(), std::io::Error> {
         debug_assert!(!self.called);
+        debug_assert!(dst.len() == self.length);
         self.called = true;
         self.reader.read_exact(dst)?;
         Ok(())
     }
+
+    pub fn block_index(&self) -> usize {
+        self.begin / BLOCK_LENGTH
+    }
+
+    pub fn begin(&self) -> usize {
+        self.begin
+    }
+
+    pub fn piece_index(&self) -> usize {
+        self.index
+    }
+
+    pub fn len(&self) -> usize {
+        self.length
+    }
 }
 
-impl<'a, T: Read> Drop for BlockData<'a, T> {
+impl<'a, T: Read> Drop for BlockReader<'a, T> {
     fn drop(&mut self) {
         if !self.called {
             std::io::copy(

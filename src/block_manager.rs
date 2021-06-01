@@ -44,19 +44,11 @@ impl BlockManager {
             piece_store,
         }
     }
-    pub fn add_block<T: Read>(
-        &mut self,
-        index: usize,
-        begin: usize,
-        length: usize,
-        data: BlockData<T>,
-    ) -> Result<(), std::io::Error> {
+    pub fn add_block<T: Read>(&mut self, data: BlockReader<T>) -> Result<(), std::io::Error> {
         if !self.piece_assigner.borrow().is_endgame() {
             self.blocks_in_flight -= 1;
         }
-        self.piece_store
-            .borrow_mut()
-            .write_block(index, begin, length, data)?;
+        self.piece_store.borrow_mut().write_block(data)?;
         Ok(())
     }
 
