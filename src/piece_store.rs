@@ -110,8 +110,6 @@ impl FileSystem {
                 }
             }
         }
-        result.sort();
-        result.reverse();
         result
     }
 
@@ -158,26 +156,11 @@ impl FileSystem {
         }
     }
 
-    pub fn snapshot_blocks_received(&mut self) -> usize {
-        let result = self.snapshot_blocks_received;
-        self.snapshot_blocks_received = 0;
-        return result;
-    }
-
     pub fn write_block<T: Read>(&mut self, block: BlockReader<T>) -> Result<(), std::io::Error> {
         let piece_index = block.piece_index();
         if self.info.have[piece_index].load(Ordering::Relaxed) {
-            info!("Got block for already received piece");
+            debug!("Got block for already received piece");
             return Ok(());
-        }
-        if let Occupied(value) = self.write_cache.entry(piece_index) {
-            if value.get().have[block.block_index()] {
-                info!(
-                    "Got block that has already been received: piece_index: {}, block_index: {}",
-                    piece_index,
-                    block.block_index()
-                );
-            }
         }
         self.snapshot_blocks_received += 1;
         let piece_info = self.piece_info;
@@ -432,11 +415,10 @@ impl PieceInFlight {
         &mut self,
         mut block: BlockReader<T>,
     ) -> Result<Option<CompletedPiece>, std::io::Error> {
-        // TODO (tonyt): These shouldn't be panics, since they may happen in normal use
         debug_assert!(block.piece_index() == self.index);
         debug_assert!(self.piece.len() != 0);
         if block.block_index() >= self.have.len() {
-            panic!("Error! Out of range");
+            return Err(std::io::Error::from(std::io::ErrorKind::InvalidData));
         }
         if self.have[block.block_index()] {
             return Ok(None);
@@ -445,7 +427,7 @@ impl PieceInFlight {
             .piece_info
             .get_block_length(block.block_index(), self.index);
         if block_length != block.len() {
-            panic!("Error in block length");
+            return Err(std::io::Error::from(std::io::ErrorKind::InvalidData));
         }
         self.blocks_received += 1;
         let end = block.begin() + block.len();

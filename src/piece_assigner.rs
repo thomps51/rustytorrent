@@ -1,5 +1,7 @@
-use std::collections::VecDeque;
+use std::collections::hash_map::Entry::Occupied;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::mpsc::Receiver;
+use std::time::Instant;
 
 use bit_vec::BitVec;
 use log::info;
@@ -9,19 +11,26 @@ use rand::thread_rng;
 use crate::messages::Request;
 use crate::piece_info::PieceInfo;
 
+type ConnectionId = usize;
+type PieceId = usize;
+type BlockId = usize;
+
 pub struct PieceAssigner {
-    piece_info: PieceInfo,
+    pub piece_info: PieceInfo,
     pieces: VecDeque<usize>,
     left: BitVec,
     failed_hash: Receiver<(usize, usize)>,
     endgame: bool,
     current_piece: Option<usize>,
     current_block: usize,
+    assigned: HashMap<ConnectionId, HashMap<PieceId, HashSet<BlockId>>>,
+    endgame_unreceived_blocks: Vec<Request>,
+    prev_unreceived_call: Instant,
 }
 
 pub enum AssignedBlockResult {
     AssignedBlock { request: Request },
-    EnterEndgame,
+    EndgameAssignedBlock { request: Request },
     NoBlocksToAssign,
 }
 
@@ -45,18 +54,66 @@ impl PieceAssigner {
             endgame: false,
             current_piece: None,
             current_block: 0,
+            assigned: HashMap::new(),
+            endgame_unreceived_blocks: Vec::new(),
+            prev_unreceived_call: Instant::now(),
         }
     }
 
-    pub fn get_block(&mut self, peer_has: &BitVec, _connection_id: usize) -> AssignedBlockResult {
+    pub fn clear(&mut self) {
+        self.assigned.clear();
+    }
+
+    pub fn get_block<F: Fn() -> Vec<Request>>(
+        &mut self,
+        peer_has: &BitVec,
+        connection_id: usize,
+        unreceived: F,
+    ) -> AssignedBlockResult {
+        if self.endgame_unreceived_blocks.len() > 0 {
+            let pieces_assigned = self.assigned.entry(connection_id).or_default();
+            let mut request = None;
+            for (pos, block_request) in self.endgame_unreceived_blocks.iter().enumerate() {
+                if let Occupied(entry) = pieces_assigned.entry(block_request.piece_index()) {
+                    if entry.get().contains(&block_request.block_index()) {
+                        continue;
+                    }
+                }
+                pieces_assigned
+                    .entry(block_request.piece_index())
+                    .or_default()
+                    .insert(block_request.block_index());
+                request = Some((pos, block_request.clone()));
+                break;
+            }
+            if let None = request {
+                info!(
+                    "Connection {} has already requested all unreceived blocks once",
+                    connection_id
+                );
+                return AssignedBlockResult::NoBlocksToAssign;
+            }
+            let (pos, request) = request.unwrap();
+            self.endgame_unreceived_blocks.remove(pos);
+            return AssignedBlockResult::EndgameAssignedBlock { request };
+        }
         if self.pieces.len() == 0 && self.current_piece.is_none() {
             while let Ok((value, _length)) = self.failed_hash.try_recv() {
                 self.pieces.push_back(value);
             }
             if self.pieces.len() == 0 {
-                info!("Entering endgame mode");
-                self.endgame = true;
-                return AssignedBlockResult::EnterEndgame;
+                // Throttle calls to unreceived because they are expensive and blocks will likely
+                // be in flight
+                if self.prev_unreceived_call.elapsed() < std::time::Duration::from_secs(1) {
+                    return AssignedBlockResult::NoBlocksToAssign;
+                }
+                self.endgame_unreceived_blocks = unreceived();
+                self.prev_unreceived_call = Instant::now();
+                if self.endgame_unreceived_blocks.is_empty() {
+                    info!("No more unreceived blocks!");
+                    return AssignedBlockResult::NoBlocksToAssign;
+                }
+                return self.get_block(peer_has, connection_id, unreceived);
             }
         }
         let current_piece = {

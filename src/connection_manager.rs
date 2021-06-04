@@ -6,12 +6,11 @@ use std::rc::Rc;
 use std::sync::mpsc;
 
 use bit_vec::BitVec;
-use log::{info, warn};
+use log::info;
 use mio::event::Event;
 use mio::net::{TcpListener, TcpStream};
 use mio::{Events, Interest, Poll, Token};
 
-use crate::block_manager::MAX_OPEN_REQUESTS_PER_PEER;
 use crate::connection::{Connection, State, UpdateSuccess};
 use crate::messages::Have;
 use crate::piece_assigner::PieceAssigner;
@@ -27,11 +26,6 @@ const LISTEN_PORT: u16 = 6881;
 const MAX_PEERS: usize = 50;
 const PRINT_UPDATE_TIME: std::time::Duration = std::time::Duration::from_secs(1);
 
-enum RunState {
-    Normal,
-    Endgame,
-}
-
 pub struct ConnectionManager {
     connections: HashMap<Token, Connection>,
     downloaded: usize,
@@ -40,7 +34,6 @@ pub struct ConnectionManager {
     next_socket_index: usize,
     peer_list: Vec<PeerInfo>,
     piece_assigner: SharedPieceAssigner,
-    piece_info: PieceInfo,
     piece_store: SharedPieceStore,
     poll: Poll,
     recv_have: mpsc::Receiver<Have>,
@@ -77,7 +70,6 @@ impl ConnectionManager {
             next_socket_index: 0,
             peer_list: Vec::new(),
             piece_assigner,
-            piece_info,
             piece_store,
             poll,
             recv_have,
@@ -100,10 +92,6 @@ impl ConnectionManager {
         // Don't allow incoming connections past 50 peers
         // Implement responding to block requests
         // Implement both sending and receiving of cancel messages
-        let mut endgame_blocks = Vec::new();
-        let mut mode = RunState::Normal;
-        let mut endgame_initialized = false;
-        let mut endgame_sent_blocks = HashMap::new();
         loop {
             self.maybe_print_info();
             self.poll
@@ -112,12 +100,22 @@ impl ConnectionManager {
                 match event.token() {
                     LISTENER => self.accept_connections(&mut listener),
                     token => {
-                        if self.handle_event(token, Some(event)) {
-                            mode = RunState::Endgame;
-                        }
+                        let _ = self.handle_event(token, Some(event));
                     }
                 }
             }
+            // TODO: Can the download stall?  If no reads are happening, we won't ever request more.
+            // E.g., the following series of events:
+            // - Endgame mode starts
+            // - Initial batch of unreceived runs out, but we throttle calls to that function
+            // - Peer 1 grabbed a request from that initial batch, but failed a hash check
+            // - Peer 2 got throttled when calling unreceived(), so they didn't request any
+            // - Peer 2 will possibly never start downloading pieces now, since it didn't request any
+            //
+            // We can fix this by simply looping over the connections and requesting they request
+            // more pieces if they are under their limit.  We could do this if the Poll times out,
+            // but then we could have a peer sending bad data that prevents that logic from being run.
+            // So we need to do this only if we haven't made forward progress in a given amount of time.
             self.send_haves();
             if self.connections.len() < MAX_PEERS {
                 self.add_peers();
@@ -125,62 +123,6 @@ impl ConnectionManager {
             if self.piece_store.borrow().done() {
                 assert!(self.piece_store.borrow().verify_all_files());
                 break;
-            }
-            if let RunState::Endgame = mode {
-                if !endgame_initialized {
-                    info!("Starting endgame request broadcasting");
-                    let mut piece_store = self.piece_store.borrow_mut();
-                    endgame_blocks = piece_store.endgame_get_unreceived_blocks();
-                    info!("Total Unreceived blocks: {}", endgame_blocks.len());
-                    let _ = piece_store.snapshot_blocks_received();
-                    endgame_initialized = true;
-                }
-                let (endgame_bif, _cancel) = self
-                    .piece_store
-                    .borrow()
-                    .endgame_reconcile(&mut endgame_sent_blocks);
-                let mut endgame_blocks_in_flight = endgame_bif;
-
-                // If I haven't sent any in 30 seconds, send MAX more
-                while endgame_blocks_in_flight < MAX_OPEN_REQUESTS_PER_PEER {
-                    if let Some(request) = endgame_blocks.pop() {
-                        info!("Broadcasting {:?}", request);
-                        endgame_sent_blocks
-                            .entry(request.piece_index())
-                            .or_insert(BitVec::from_elem(
-                                self.piece_info.get_num_blocks(request.piece_index()),
-                                false,
-                            ))
-                            .set(request.block_index(), true);
-                        let mut to_remove = Vec::new();
-                        for (id, peer) in &mut self.connections {
-                            if !peer.peer_has[request.piece_index()] {
-                                continue;
-                            }
-                            match peer.send(&request) {
-                                Err(error) => {
-                                    info!("Disconnecting peer {}: {} while sending", id.0, error);
-                                    peer.deregister(&mut self.poll);
-                                    to_remove.push(*id);
-                                }
-                                Ok(sent) => {
-                                    if !sent {
-                                        warn!("Connection {}: TCP Pushback kept message from being sent", id.0);
-                                    }
-                                }
-                            }
-                        }
-                        endgame_blocks_in_flight += 1;
-                        for id in to_remove {
-                            self.connections.remove(&id);
-                        }
-                    } else {
-                        warn!("Finsihed with endgame blocks, attempting to get more");
-                        //endgame_blocks = self.piece_store.borrow().endgame_get_unreceived_blocks();
-                        //info!("Total Unreceived blocks: {}", endgame_blocks.len());
-                        break;
-                    }
-                }
             }
         }
         Ok(())
