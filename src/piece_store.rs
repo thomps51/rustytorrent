@@ -1,4 +1,3 @@
-use std::collections::hash_map::Entry::Occupied;
 use std::collections::HashMap;
 use std::error::Error;
 use std::fs;
@@ -113,10 +112,7 @@ impl FileSystem {
         result
     }
 
-    fn get_bytes(&self, index: usize, offset: usize, num_bytes: usize) -> Option<Vec<u8>> {
-        if !self.info.have[index].load(Ordering::Relaxed) {
-            return None;
-        }
+    fn get_bytes(&self, index: usize, offset: usize, num_bytes: usize) -> Vec<u8> {
         let mut result = Vec::new();
         result.resize(num_bytes, 0u8);
         let mut current_index = 0;
@@ -140,12 +136,12 @@ impl FileSystem {
             let read = file.read(&mut result[current_index..]).unwrap();
             current_index += read;
             if current_index == num_bytes {
-                return Some(result);
+                return result;
             }
             file_begin = file_end;
         }
         result.resize(current_index, 0);
-        Some(result)
+        result
     }
 
     fn get_piece_length(&self, index: usize) -> usize {
@@ -183,29 +179,33 @@ impl PieceStore for FileSystem {
         failed_hash: Sender<(usize, usize)>,
         have_send: Sender<Have>,
     ) -> Result<Self, Box<dyn Error>> {
-        let mut allocated_files = AllocatedFiles::new();
-        for file in &torrent.metainfo.files {
-            let path = &file.path;
-
-            // check if file exists
-            // check if file is the correct size
-            // if it's the correct size, determine which pieces are valid and which need to still be downloaded
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-
-            // currently just recreates files
-            let f = std::fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create(true)
-                .open(&path)?;
-            f.set_len(file.length as u64)?;
-            allocated_files.insert(path.to_path_buf(), f);
-        }
         let num_pieces = torrent.metainfo.pieces.len();
+        let mut allocated_files = AllocatedFiles::new();
         let mut have = Vec::new();
         have.resize_with(num_pieces, || AtomicBool::new(false));
+        let mut check_files = false;
+        for file in &torrent.metainfo.files {
+            let path = &file.path;
+            if path.exists() && std::fs::metadata(path).unwrap().len() == file.length as u64 {
+                let f = std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&path)?;
+                check_files = true;
+                allocated_files.insert(path.to_path_buf(), f);
+            } else {
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                let f = std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .create(true)
+                    .open(&path)?;
+                f.set_len(file.length as u64)?;
+                allocated_files.insert(path.to_path_buf(), f);
+            }
+        }
         let mut last_piece_length = torrent.metainfo.total_size % torrent.metainfo.piece_length;
         if last_piece_length == 0 {
             last_piece_length = torrent.metainfo.piece_length;
@@ -219,7 +219,7 @@ impl PieceStore for FileSystem {
             have: have.into(),
             have_count: Default::default(),
         });
-        Ok(FileSystem {
+        let fs = FileSystem {
             failed_hash,
             have_send,
             info,
@@ -228,7 +228,21 @@ impl PieceStore for FileSystem {
             sender: None,
             write_thread: None,
             write_cache: HashMap::new(),
-        })
+        };
+        if !check_files {
+            return Ok(fs);
+        }
+        let mut have_count = 0;
+        for i in 0..num_pieces {
+            let piece = fs.get_bytes(i, 0, fs.get_piece_length(i));
+            if !is_valid_piece(&piece, i, &fs.info.piece_hashes) {
+                continue;
+            }
+            have_count += 1;
+            fs.info.have[i].store(true, Ordering::Relaxed);
+        }
+        fs.info.have_count.store(have_count, Ordering::Relaxed);
+        Ok(fs)
     }
 
     fn done(&self) -> bool {
@@ -237,13 +251,19 @@ impl PieceStore for FileSystem {
 
     // This should have a cache layer so we don't go to disk for each block
     fn get_block(&self, index: usize, offset: usize) -> Option<Vec<u8>> {
-        self.get_bytes(index, offset, BLOCK_LENGTH)
+        if !self.info.have[index].load(Ordering::Relaxed) {
+            return None;
+        }
+        Some(self.get_bytes(index, offset, BLOCK_LENGTH))
     }
 
     // Returns None if we do not have that piece
     // This should have a cache layer so we don't go to disk everytime
     fn get_piece(&self, index: usize) -> Option<Vec<u8>> {
-        self.get_bytes(index, 0, self.get_piece_length(index))
+        if !self.info.have[index].load(Ordering::Relaxed) {
+            return None;
+        }
+        Some(self.get_bytes(index, 0, self.get_piece_length(index)))
     }
     fn get_block_have(&self, index: usize) -> BitVec {
         let num_blocks = self.piece_info.get_num_blocks(index);

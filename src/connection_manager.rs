@@ -57,10 +57,14 @@ impl ConnectionManager {
             total_pieces: num_pieces,
             total_length: torrent.metainfo.total_size,
         };
-        let piece_assigner = Rc::new(RefCell::new(PieceAssigner::new(piece_info, recv)));
         let piece_store: Rc<RefCell<_>> = Rc::new(RefCell::new(
             FileSystem::new(&torrent, piece_info, send, send_have).unwrap(),
         ));
+        let piece_assigner = Rc::new(RefCell::new(PieceAssigner::new(
+            piece_info,
+            recv,
+            piece_store.borrow().have(),
+        )));
         let poll = Poll::new().unwrap();
         ConnectionManager {
             connections: HashMap::new(),
@@ -123,6 +127,23 @@ impl ConnectionManager {
             if self.piece_store.borrow().done() {
                 assert!(self.piece_store.borrow().verify_all_files());
                 break;
+            }
+        }
+        // disconnect from seeders
+        loop {
+            self.maybe_print_info();
+            self.poll
+                .poll(&mut events, Some(std::time::Duration::from_secs(1)))?;
+            for event in &events {
+                match event.token() {
+                    LISTENER => self.accept_connections(&mut listener),
+                    token => {
+                        let _ = self.handle_event(token, Some(event));
+                    }
+                }
+            }
+            if self.connections.len() < MAX_PEERS {
+                self.add_peers();
             }
         }
         Ok(())
@@ -231,6 +252,7 @@ impl ConnectionManager {
         let now = std::time::Instant::now();
         if now - self.last_update > PRINT_UPDATE_TIME {
             let download_rate = (self.downloaded as f64) / ((1 << 20) as f64);
+            let upload_rate = (self.uploaded as f64) / ((1 << 20) as f64);
             self.downloaded = 0;
             self.uploaded = 0;
             print!("{esc}[2J{esc}[1;1H", esc = 27 as char);
@@ -250,9 +272,10 @@ impl ConnectionManager {
             }
             print!("{}\n", progress_bar);
             print!(
-                "Percent done: {:.2}% Download: {:.2} MiB/s Peers: {}\n",
+                "Percent done: {:.2}% Download: {:.2} MiB/s Upload: {:.2} MiB/s Peers: {}\n",
                 self.piece_store.borrow().percent_done(),
                 download_rate,
+                uplodate_rate,
                 self.connections.len(),
             );
             info!("Download: {:.2} MiB/s", download_rate);

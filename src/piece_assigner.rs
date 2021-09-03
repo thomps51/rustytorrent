@@ -39,12 +39,14 @@ pub enum AssignedBlockResult {
 // 'endgame mode'
 
 impl PieceAssigner {
-    pub fn new(piece_info: PieceInfo, failed_hash: Receiver<(usize, usize)>) -> Self {
-        let mut pieces = Vec::new();
-        pieces.resize(piece_info.total_pieces, 0);
-        for i in 0..piece_info.total_pieces {
-            pieces[i] = i;
+    pub fn new(piece_info: PieceInfo, failed_hash: Receiver<(usize, usize)>, have: BitVec) -> Self {
+        let mut pieces = Vec::with_capacity(piece_info.total_pieces);
+        for (piece_index, value) in have.iter().enumerate() {
+            if !value {
+                pieces.push(piece_index)
+            }
         }
+        pieces.shrink_to_fit();
         pieces.shuffle(&mut thread_rng());
         Self {
             piece_info,

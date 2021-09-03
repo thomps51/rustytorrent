@@ -19,6 +19,7 @@ pub enum State {
     ReadingHandshake,
     ConnectedNormal,
     ConnectedEndgame,
+    Seeding,
 }
 
 enum Type {
@@ -288,16 +289,29 @@ impl Connection {
 
     pub fn update(&mut self) -> UpdateResult {
         match self.state {
-            State::ConnectedEndgame => {
+            State::Seeding => {
                 let read_result = self.read_all()?;
-                // Cancel requested Requests (TODO)
-                // Respond to Requests (TODO)
-                return Ok(read_result);
+                let to_send: Vec<Request> = self.pending_peer_requests.drain(..).collect();
+                for request in to_send {
+                    // don't bother checking result, if they give us TCP pushback, it's their own damn fault
+                    if !self.send(&request)? {
+                        break;
+                    }
+                }
+                Ok(read_result)
             }
-            State::ConnectedNormal => {
+            State::ConnectedNormal | State::ConnectedEndgame => {
                 let read_result = self.read_all()?;
                 // Cancel requested Requests (TODO)
-                // Respond to Requests (TODO)
+                if !self.pending_peer_requests.is_empty() {
+                    let to_send: Vec<Request> = self.pending_peer_requests.drain(..).collect();
+                    for request in to_send {
+                        // don't bother checking result, if they give us TCP pushback, it's their own damn fault
+                        if !self.send(&request)? {
+                            break;
+                        }
+                    }
+                }
                 if self.block_manager.piece_assigner.borrow().is_endgame() {
                     self.state = State::ConnectedEndgame;
                     return Ok(read_result);
