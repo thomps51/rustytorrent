@@ -8,8 +8,8 @@ use log::info;
 use rand::seq::SliceRandom;
 use rand::thread_rng;
 
+use super::piece_info::PieceInfo;
 use crate::messages::Request;
-use crate::piece_info::PieceInfo;
 
 type ConnectionId = usize;
 type PieceId = usize;

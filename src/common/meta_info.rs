@@ -3,13 +3,13 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use crate::bencoding;
-use crate::hash;
+use crate::common::hash;
+use crate::common::Sha1Hash;
+use crate::common::SHA1_HASH_LENGTH;
 use bencoding::get_as;
 use bencoding::Dictionary;
 use bencoding::Encode;
 use bencoding::List;
-use hash::Sha1Hash;
-use hash::SHA1_HASH_LENGTH;
 
 #[derive(Debug, Clone)]
 pub struct File {

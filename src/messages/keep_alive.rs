@@ -4,7 +4,7 @@ use std::io::Write;
 
 use super::Message;
 use super::MessageLength;
-use crate::connection::{Connection, UpdateResult, UpdateSuccess};
+use crate::client::{EstablishedConnection, UpdateResult, UpdateSuccess};
 
 #[derive(Debug, Clone)]
 pub struct KeepAlive {}
@@ -18,7 +18,7 @@ impl Message for KeepAlive {
         Ok(KeepAlive {})
     }
 
-    fn update(self, connection: &mut Connection) -> UpdateResult {
+    fn update(self, connection: &mut EstablishedConnection) -> UpdateResult {
         connection.received_keep_alive();
         Ok(UpdateSuccess::Success)
     }

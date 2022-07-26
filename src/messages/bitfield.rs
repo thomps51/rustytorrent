@@ -6,7 +6,7 @@ use bit_vec::BitVec;
 
 use super::Message;
 use super::MessageLength;
-use crate::connection::{Connection, UpdateResult, UpdateSuccess};
+use crate::client::{EstablishedConnection, UpdateResult, UpdateSuccess};
 
 #[derive(Debug, Clone)]
 pub struct Bitfield {
@@ -32,7 +32,7 @@ impl Message for Bitfield {
         })
     }
 
-    fn update(self, connection: &mut Connection) -> UpdateResult {
+    fn update(self, connection: &mut EstablishedConnection) -> UpdateResult {
         // Received bitfield was padded with extra bits, so we need to truncate it
         connection.peer_has = self.bitfield;
         connection.peer_has.truncate(connection.num_pieces);

@@ -6,9 +6,9 @@ use super::read_as_be;
 use super::to_u32_be;
 use super::Message;
 use super::MessageLength;
-use crate::connection::{Connection, UpdateResult, UpdateSuccess};
-use crate::constants::BLOCK_LENGTH;
-use crate::piece_info::PieceInfo;
+use crate::client::piece_info::PieceInfo;
+use crate::client::{EstablishedConnection, UpdateResult, UpdateSuccess};
+use crate::common::BLOCK_LENGTH;
 
 #[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord)]
 pub struct Request {
@@ -33,7 +33,7 @@ impl Message for Request {
         })
     }
 
-    fn update(self, connection: &mut Connection) -> UpdateResult {
+    fn update(self, connection: &mut EstablishedConnection) -> UpdateResult {
         connection.pending_peer_requests.push(self);
         Ok(UpdateSuccess::Success)
     }

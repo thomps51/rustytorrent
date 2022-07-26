@@ -6,7 +6,7 @@ use super::read_as_be;
 use super::to_u32_be;
 use super::Message;
 use super::MessageLength;
-use crate::connection::{Connection, UpdateError, UpdateResult, UpdateSuccess};
+use crate::client::{EstablishedConnection, UpdateError, UpdateResult, UpdateSuccess};
 
 #[derive(Debug, Clone)]
 pub struct Have {
@@ -22,7 +22,7 @@ impl Message for Have {
         let index = read_as_be::<u32, _, _>(reader)?;
         Ok(Have { index })
     }
-    fn update(self, connection: &mut Connection) -> UpdateResult {
+    fn update(self, connection: &mut EstablishedConnection) -> UpdateResult {
         if self.index as usize >= connection.peer_has.len() {
             return Err(UpdateError::IndexOutOfBounds);
         }

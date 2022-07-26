@@ -3,10 +3,10 @@ use std::io::prelude::*;
 
 use bit_vec::BitVec;
 
+use super::piece_assigner::AssignedBlockResult;
+use crate::common::SharedPieceAssigner;
+use crate::common::SharedPieceStore;
 use crate::messages::*;
-use crate::piece_assigner::AssignedBlockResult;
-use crate::SharedPieceAssigner;
-use crate::SharedPieceStore;
 
 // Stats for Vuze
 // Value : Max Speed (MB/s)

@@ -4,7 +4,7 @@ use std::io::Write;
 
 use log::{debug, info};
 
-use crate::connection::{Connection, UpdateResult};
+use crate::client::{EstablishedConnection, UpdateResult};
 
 pub enum MessageLength {
     Fixed(usize),
@@ -60,7 +60,7 @@ pub trait Message: Sized {
         Ok(message)
     }
 
-    fn update(self, connection: &mut Connection) -> UpdateResult;
+    fn update(self, connection: &mut EstablishedConnection) -> UpdateResult;
 
     fn write_data<T: Write>(&self, _: &mut T) -> Result<(), Error> {
         debug_assert_eq!(std::mem::size_of::<Self>(), 0);

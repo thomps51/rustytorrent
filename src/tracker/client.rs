@@ -6,10 +6,18 @@ use log::{debug, info};
 use reqwest;
 
 use crate::bencoding;
-use crate::constants::PEER_ID;
-use crate::torrent::Torrent;
+use crate::common::Torrent;
+use crate::common::PEER_ID;
 
-pub struct Tracker {
+pub trait TrackerClient: Sized {
+    fn announce(
+        &self,
+        torrent: &Torrent,
+        kind: EventKind,
+    ) -> Result<TrackerResponse, Box<dyn Error>>;
+}
+
+pub struct TrackerClientImpl {
     pub address: String,
     pub listen_port: u16,
 }
@@ -22,10 +30,10 @@ pub struct PeerInfo {
 
 pub type PeerInfoList = Vec<PeerInfo>;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TrackerResponse {
     pub peer_list: PeerInfoList,
-    interval: i64,
+    pub interval: i64,
 }
 
 pub enum EventKind {
@@ -36,7 +44,7 @@ pub enum EventKind {
 }
 
 impl EventKind {
-    fn to_str(&self) -> &'static str {
+    pub fn to_str(&self) -> &'static str {
         match self {
             Self::Started => "started",
             Self::Completed => "completed",
@@ -46,10 +54,10 @@ impl EventKind {
     }
 }
 
-impl Tracker {
+impl TrackerClient for TrackerClientImpl {
     // make this async for updates other than the first?
     // probably needs tracker-specific errors instead of just parse errors
-    pub fn announce(
+    fn announce(
         &self,
         torrent: &Torrent,
         kind: EventKind,

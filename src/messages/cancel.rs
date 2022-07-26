@@ -6,7 +6,7 @@ use super::read_as_be;
 use super::to_u32_be;
 use super::Message;
 use super::MessageLength;
-use crate::connection::{Connection, UpdateResult, UpdateSuccess};
+use crate::client::{EstablishedConnection, UpdateResult, UpdateSuccess};
 
 #[derive(Debug, Clone)]
 pub struct Cancel {
@@ -31,7 +31,7 @@ impl Message for Cancel {
         })
     }
 
-    fn update(self, connection: &mut Connection) -> UpdateResult {
+    fn update(self, connection: &mut EstablishedConnection) -> UpdateResult {
         connection.pending_peer_cancels.push(self);
         Ok(UpdateSuccess::Success)
     }

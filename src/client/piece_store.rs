@@ -13,13 +13,14 @@ use std::thread::JoinHandle;
 use bit_vec::BitVec;
 use log::{debug, info, warn};
 
-use crate::constants::BLOCK_LENGTH;
-use crate::endgame;
-use crate::hash::{self, Sha1Hash};
+use super::endgame;
+use super::piece_info::PieceInfo;
+use crate::common::hash_to_bytes;
+use crate::common::File;
+use crate::common::Sha1Hash;
+use crate::common::Torrent;
+use crate::common::BLOCK_LENGTH;
 use crate::messages::{BlockReader, Cancel, Have, Request};
-use crate::meta_info::File;
-use crate::piece_info::PieceInfo;
-use crate::torrent::Torrent;
 
 // Trait that represents a "store" that writes pieces to file and has the current state of the
 // download.
@@ -68,6 +69,7 @@ pub trait PieceStore: Sized {
 
 pub type AllocatedFiles = HashMap<PathBuf, fs::File>;
 
+// Split out filesystem?
 pub struct FileSystem {
     failed_hash: Sender<(usize, usize)>,
     have_send: Sender<Have>,
@@ -75,7 +77,7 @@ pub struct FileSystem {
     pub info: Arc<FileSystemInfo>,
     piece_info: PieceInfo,
     sender: Option<Sender<CompletedPiece>>,
-    write_cache: HashMap<usize, PieceInFlight>,
+    write_cache: HashMap<usize, PieceInFlight>, // TODO: this can get arbitrarily large if we get many pieces in flight (unlikely at least)
     write_thread: Option<JoinHandle<()>>,
 }
 
@@ -394,7 +396,7 @@ impl FileSystemInfo {
 }
 
 fn is_valid_piece(piece: &[u8], index: usize, piece_hashes: &Vec<Sha1Hash>) -> bool {
-    let actual = hash::hash_to_bytes(piece);
+    let actual = hash_to_bytes(piece);
     let expected = piece_hashes[index];
     actual == expected
 }

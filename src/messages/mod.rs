@@ -22,7 +22,7 @@ pub use block::*;
 pub mod cancel;
 pub use cancel::*;
 
-use crate::connection::{Connection, UpdateResult, UpdateSuccess};
+use crate::client::{EstablishedConnection, UpdateResult, UpdateSuccess};
 use std::io::Error;
 use std::io::Read;
 use std::io::Write;
@@ -39,7 +39,7 @@ macro_rules! ImplSingleByteMessage {
             const SIZE: MessageLength = MessageLength::Fixed(1); // id
             const NAME: &'static str = stringify!($NAME);
 
-            fn update(self, connection: &mut Connection) -> UpdateResult {
+            fn update(self, connection: &mut EstablishedConnection) -> UpdateResult {
                 connection.$Flag = $Value;
                 info!(
                     "Connection {} received message {}",
@@ -75,7 +75,7 @@ impl Message for Port {
         Ok(Port { listen_port })
     }
 
-    fn update(self, _connection: &mut Connection) -> UpdateResult {
+    fn update(self, _connection: &mut EstablishedConnection) -> UpdateResult {
         // Simple ack, DHT not implemented
         Ok(UpdateSuccess::Success)
     }

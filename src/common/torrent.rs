@@ -1,4 +1,4 @@
-use crate::meta_info::MetaInfo;
+use crate::common::MetaInfo;
 use std::error::Error;
 use std::path::Path;
 

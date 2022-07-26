@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::constants::BLOCK_LENGTH;
+use crate::common::BLOCK_LENGTH;
 use crate::messages::Cancel;
 use bit_vec::BitVec;
 

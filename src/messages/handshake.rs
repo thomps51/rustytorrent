@@ -2,6 +2,8 @@ use std::io::Error;
 use std::io::Read;
 use std::io::Write;
 
+use crate::common::Sha1Hash;
+use crate::common::SHA1_HASH_LENGTH;
 use log::{debug, info};
 
 type PeerId = [u8; 20];
@@ -9,7 +11,7 @@ type PeerId = [u8; 20];
 #[derive(Debug, Clone, Default)]
 pub struct Handshake {
     pub reserved: [u8; 8],
-    pub info_hash: crate::hash::Sha1Hash,
+    pub info_hash: Sha1Hash,
     pub peer_id: PeerId,
 }
 
@@ -17,7 +19,7 @@ impl Handshake {
     pub const PSTR: &'static [u8] = "BitTorrent protocol".as_bytes();
     pub const SIZE: u8 = 49 + Self::PSTR.len() as u8;
 
-    pub fn new(peer_id: &str, info_hash: &crate::hash::Sha1Hash) -> Self {
+    pub fn new(peer_id: &str, info_hash: &Sha1Hash) -> Self {
         let mut result: Self = Default::default();
         result.info_hash = *info_hash;
         result.peer_id.copy_from_slice(peer_id.as_bytes());
@@ -29,8 +31,8 @@ impl Handshake {
         debug!("Reading handshake");
         verify_pstr(reader)?;
         debug!("Verified PSTR");
-        let mut info_hash = [0; crate::hash::SHA1_HASH_LENGTH];
-        let mut peer_id = [0; crate::hash::SHA1_HASH_LENGTH];
+        let mut info_hash = [0; SHA1_HASH_LENGTH];
+        let mut peer_id = [0; SHA1_HASH_LENGTH];
         let mut reserved = [0; 8];
         reader.read_exact(&mut reserved)?;
         reader.read_exact(&mut info_hash)?;

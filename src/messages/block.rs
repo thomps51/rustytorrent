@@ -6,8 +6,9 @@ use super::read_as_be;
 use super::to_u32_be;
 use super::Message;
 use super::MessageLength;
-use crate::connection::{Connection, UpdateResult};
-use crate::constants::BLOCK_LENGTH;
+use crate::client::BlockManager;
+use crate::client::{EstablishedConnection, UpdateResult};
+use crate::common::BLOCK_LENGTH;
 
 #[derive(Clone)]
 pub struct Block {
@@ -44,7 +45,7 @@ impl Message for Block {
         panic!("read_and_update used instead");
     }
 
-    fn update(self, _: &mut Connection) -> UpdateResult {
+    fn update(self, _: &mut EstablishedConnection) -> UpdateResult {
         panic!("read_and_update used instead");
     }
 
@@ -59,7 +60,7 @@ impl Message for Block {
 impl Block {
     pub fn read_and_update<T: Read>(
         reader: &mut T,
-        block_manager: &mut crate::block_manager::BlockManager,
+        block_manager: &mut BlockManager,
         length: usize,
     ) -> Result<(), Error> {
         // Combining read and update allows us to send the data straight where it needs to go instead

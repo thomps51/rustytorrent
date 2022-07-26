@@ -1,4 +1,4 @@
-use crate::constants::BLOCK_LENGTH;
+use crate::common::BLOCK_LENGTH;
 
 #[derive(Debug, Copy, Clone)]
 pub struct PieceInfo {
