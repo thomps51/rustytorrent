@@ -51,9 +51,8 @@ impl MetaInfo {
         }
         let mut files = Vec::new();
         let mut total_size = 0;
-        if info.contains_key("length") {
+        if let Some(length) = info.get_as("length")? {
             // Single File Case
-            let length = get_as(&info, "length")?;
             let path: String = get_as(&info, "name")?;
             files.push(File {
                 length: length,

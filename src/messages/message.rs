@@ -1,3 +1,4 @@
+use std::fmt::Debug;
 use std::io::Error;
 use std::io::Read;
 use std::io::Write;
@@ -22,7 +23,7 @@ impl From<MessageLength> for usize {
 
 // Default case will handle fixed length messages with no associated data, others will
 // be custom defined.
-pub trait Message: Sized {
+pub trait Message: Sized + Debug {
     const ID: i8;
     const SIZE: MessageLength;
     const NAME: &'static str;

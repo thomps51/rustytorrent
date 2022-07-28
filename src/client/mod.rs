@@ -1,4 +1,6 @@
 pub mod block_manager;
+use std::sync::mpsc::Sender;
+
 pub use block_manager::*;
 
 pub mod connection;
@@ -24,3 +26,5 @@ pub mod piece_info;
 
 // pub mod connection;
 // pub use connection::*;
+
+pub type CompletionHandler = Sender<bool>;

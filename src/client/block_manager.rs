@@ -1,9 +1,12 @@
+use log::debug;
+use log::info;
 use std::collections::HashMap;
 use std::io::prelude::*;
 
 use bit_vec::BitVec;
 
 use super::piece_assigner::AssignedBlockResult;
+use super::PieceStore;
 use crate::common::SharedPieceAssigner;
 use crate::common::SharedPieceStore;
 use crate::messages::*;
@@ -34,7 +37,7 @@ pub const MAX_OPEN_REQUESTS_PER_PEER: usize = 10;
 pub struct BlockManager {
     pub blocks_in_flight: usize,
     pub piece_assigner: SharedPieceAssigner,
-    piece_store: SharedPieceStore,
+    pub piece_store: SharedPieceStore,
     endgame_sent_blocks: HashMap<usize, BitVec>,
 }
 
@@ -55,6 +58,16 @@ impl BlockManager {
         Ok(())
     }
 
+    pub fn bitfield(&self) -> Bitfield {
+        let have = self.piece_store.borrow().have();
+        debug!("Creating Bitfield with length: {}", have.len());
+        Bitfield { bitfield: have }
+    }
+
+    pub fn is_done(&self) -> bool {
+        self.piece_store.borrow().done()
+    }
+
     pub fn send_block_requests<T: Write>(
         &mut self,
         stream: &mut T,
@@ -65,16 +78,20 @@ impl BlockManager {
         let mut is_endgame = false;
         let mut piece_assigner = self.piece_assigner.borrow_mut();
         while self.blocks_in_flight < MAX_OPEN_REQUESTS_PER_PEER {
+            info!("send_block_requests loop");
             match piece_assigner.get_block(&peer_has, id, || {
                 self.piece_store.borrow().endgame_get_unreceived_blocks()
             }) {
                 AssignedBlockResult::NoBlocksToAssign => {
+                    info!("no blocks to assign");
                     break;
                 }
                 AssignedBlockResult::AssignedBlock { request } => {
+                    debug!("Assigned block: {:?}", request);
                     request.write_to(stream)?;
                 }
                 AssignedBlockResult::EndgameAssignedBlock { request } => {
+                    debug!("Endgame assigned block: {:?}", request);
                     request.write_to(stream)?;
                     is_endgame = true;
                     self.endgame_sent_blocks

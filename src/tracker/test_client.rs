@@ -22,6 +22,15 @@ impl TestTrackerClient {
             },
         }
     }
+
+    pub fn new_empty() -> Self {
+        Self {
+            response: TrackerResponse {
+                peer_list: vec![],
+                interval: 0,
+            },
+        }
+    }
 }
 
 impl TrackerClient for TestTrackerClient {

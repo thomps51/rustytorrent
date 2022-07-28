@@ -19,7 +19,8 @@ impl Message for Bitfield {
     const NAME: &'static str = "Bitfield";
 
     fn length(&self) -> usize {
-        1 + self.bitfield.len()
+        // 1 + ceil(bits/8)
+        1 + ((self.bitfield.len() + 7) / 8)
     }
 
     fn read_data<T: Read>(reader: &mut T, length: usize) -> Result<Self, Error> {
@@ -27,9 +28,10 @@ impl Message for Bitfield {
         let size = length - 1; // Subtract the ID byte
         buffer.resize(size as _, 0);
         reader.read_exact(&mut buffer)?;
-        Ok(Bitfield {
+        let result = Bitfield {
             bitfield: BitVec::from_bytes(&buffer),
-        })
+        };
+        Ok(result)
     }
 
     fn update(self, connection: &mut EstablishedConnection) -> UpdateResult {
@@ -40,7 +42,8 @@ impl Message for Bitfield {
     }
 
     fn write_data<T: Write>(&self, writer: &mut T) -> Result<(), Error> {
-        writer.write_all(&self.bitfield.to_bytes())?;
+        let bytes = self.bitfield.to_bytes();
+        writer.write_all(&bytes)?;
         Ok(())
     }
 }

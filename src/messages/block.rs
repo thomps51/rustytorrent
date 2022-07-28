@@ -10,11 +10,11 @@ use crate::client::BlockManager;
 use crate::client::{EstablishedConnection, UpdateResult};
 use crate::common::BLOCK_LENGTH;
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Block {
-    index: usize,
-    begin: usize,
-    block: Vec<u8>,
+    pub index: usize,
+    pub begin: usize,
+    pub block: Vec<u8>,
 }
 
 // BlockReader makes sure that the data from the Block message is read from the read buffer.  It does
@@ -50,6 +50,12 @@ impl Message for Block {
     }
 
     fn write_data<T: Write>(&self, writer: &mut T) -> Result<(), Error> {
+        log::info!(
+            "Writing Block message, index: {}, begin: {}, size: {}",
+            self.index,
+            self.begin,
+            self.length()
+        );
         writer.write_all(&to_u32_be(self.index))?;
         writer.write_all(&to_u32_be(self.begin))?;
         writer.write_all(&self.block)?;
@@ -68,6 +74,12 @@ impl Block {
         let index = read_as_be::<u32, _, usize>(reader)?;
         let begin = read_as_be::<u32, _, usize>(reader)?;
         let size = length - 9; // id byte, 2 4-byte sizes
+        log::info!(
+            "Reading and updating from Block message, index: {}, begin: {}, size: {}",
+            index,
+            begin,
+            size
+        );
         block_manager.add_block(BlockReader::new(reader, begin, index, size))?;
         Ok(())
     }

@@ -15,6 +15,7 @@ use log::{debug, info, warn};
 
 use super::endgame;
 use super::piece_info::PieceInfo;
+use super::CompletionHandler;
 use crate::common::hash_to_bytes;
 use crate::common::File;
 use crate::common::Sha1Hash;
@@ -35,6 +36,7 @@ pub trait PieceStore: Sized {
         piece_info: PieceInfo,
         failed_hash: Sender<(usize, usize)>,
         have_send: Sender<Have>,
+        completion_handler: Option<CompletionHandler>,
     ) -> Result<Self, Box<dyn Error>>;
 
     fn done(&self) -> bool;
@@ -79,6 +81,7 @@ pub struct FileSystem {
     sender: Option<Sender<CompletedPiece>>,
     write_cache: HashMap<usize, PieceInFlight>, // TODO: this can get arbitrarily large if we get many pieces in flight (unlikely at least)
     write_thread: Option<JoinHandle<()>>,
+    completion_handler: Option<CompletionHandler>,
 }
 
 impl FileSystem {
@@ -119,15 +122,21 @@ impl FileSystem {
         result.resize(num_bytes, 0u8);
         let mut current_index = 0;
         let begin_byte = index * self.info.piece_length + offset;
+        // debug!(
+        //     "begin_byte: {}, index: {}, piece_length: {}, offset: {}",
+        //     begin_byte, index, self.info.piece_length, offset
+        // );
         let mut file_begin = 0;
         for file_info in &self.info.files_info {
+            // debug!("Reading {:?}", file_info.path);
             let file_end = file_begin + file_info.length;
+            // debug!("file_end: {}", file_end);
             if begin_byte >= file_end {
                 file_begin = file_end;
                 continue;
             }
             let file_temp = self.info.files.lock().unwrap();
-            let mut file = file_temp.get(file_info.path.as_path()).unwrap();
+            let mut file = file_temp.get(&file_info.path).unwrap();
             let piece_start_byte_in_file = if begin_byte < file_begin {
                 0
             } else {
@@ -136,8 +145,10 @@ impl FileSystem {
             file.seek(SeekFrom::Start(piece_start_byte_in_file as u64))
                 .unwrap();
             let read = file.read(&mut result[current_index..]).unwrap();
+            // debug!("Read {} bytes from file", read);
             current_index += read;
             if current_index == num_bytes {
+                // debug!("got full number of bytes");
                 return result;
             }
             file_begin = file_end;
@@ -162,6 +173,17 @@ impl FileSystem {
         }
         self.snapshot_blocks_received += 1;
         let piece_info = self.piece_info;
+        let cache_info: Vec<_> = self
+            .write_cache
+            .iter()
+            .map(|(_, v)| (v.index, v.blocks_received, &v.have))
+            .collect();
+        debug!(
+            "write_block: piece_index: {}, block_index: {}, write_cache: {:?}",
+            block.piece_index(),
+            block.block_index(),
+            cache_info
+        );
         let piece = self
             .write_cache
             .entry(block.piece_index())
@@ -180,22 +202,26 @@ impl PieceStore for FileSystem {
         piece_info: PieceInfo,
         failed_hash: Sender<(usize, usize)>,
         have_send: Sender<Have>,
+        completion_handler: Option<CompletionHandler>,
     ) -> Result<Self, Box<dyn Error>> {
         let num_pieces = torrent.metainfo.pieces.len();
         let mut allocated_files = AllocatedFiles::new();
         let mut have = Vec::new();
+        info!("Creating Filesystem with num_pieces: {}", num_pieces);
         have.resize_with(num_pieces, || AtomicBool::new(false));
         let mut check_files = false;
         for file in &torrent.metainfo.files {
-            let path = &file.path;
-            if path.exists() && std::fs::metadata(path).unwrap().len() == file.length as u64 {
+            let path = torrent.destination.join(&file.path);
+            if path.exists() && std::fs::metadata(&path).unwrap().len() == file.length as u64 {
                 let f = std::fs::OpenOptions::new()
                     .read(true)
                     .write(true)
                     .open(&path)?;
                 check_files = true;
+                info!("Found existing file at {:?}, will check", path);
                 allocated_files.insert(path.to_path_buf(), f);
             } else {
+                info!("Did not find existing file");
                 if let Some(parent) = path.parent() {
                     std::fs::create_dir_all(parent)?;
                 }
@@ -212,9 +238,14 @@ impl PieceStore for FileSystem {
         if last_piece_length == 0 {
             last_piece_length = torrent.metainfo.piece_length;
         }
+        // files info needs to have the full path, including destination
+        let mut files_info = torrent.metainfo.files.clone();
+        for file in files_info.iter_mut() {
+            file.path = torrent.destination.join(&file.path);
+        }
         let info = Arc::new(FileSystemInfo {
             piece_hashes: torrent.metainfo.pieces.clone(),
-            files_info: torrent.metainfo.files.clone(),
+            files_info,
             piece_length: torrent.metainfo.piece_length,
             last_piece_length,
             files: allocated_files.into(),
@@ -230,6 +261,7 @@ impl PieceStore for FileSystem {
             sender: None,
             write_thread: None,
             write_cache: HashMap::new(),
+            completion_handler,
         };
         if !check_files {
             return Ok(fs);
@@ -243,6 +275,7 @@ impl PieceStore for FileSystem {
             have_count += 1;
             fs.info.have[i].store(true, Ordering::Relaxed);
         }
+        info!("Found {} pieces already locally", have_count);
         fs.info.have_count.store(have_count, Ordering::Relaxed);
         Ok(fs)
     }
@@ -317,9 +350,15 @@ impl PieceStore for FileSystem {
                 let info = self.info.clone();
                 let mut failed_hash_sender = self.failed_hash.clone();
                 let mut have_send = self.have_send.clone();
+                let mut completion_handler = self.completion_handler.clone();
                 self.write_thread = Some(thread::spawn(move || {
                     while let Ok(piece) = receiver.recv() {
-                        info.write(&mut failed_hash_sender, &mut have_send, piece);
+                        info.write(
+                            &mut failed_hash_sender,
+                            &mut have_send,
+                            piece,
+                            &mut completion_handler,
+                        );
                     }
                 }))
             }
@@ -346,16 +385,37 @@ impl FileSystemInfo {
         failed_hash: &mut Sender<(usize, usize)>,
         have_send: &mut Sender<Have>,
         piece: CompletedPiece,
+        completion_handler: &mut Option<CompletionHandler>,
     ) {
         if self.have[piece.index].load(Ordering::Relaxed) {
             return;
         }
-        debug!("Writing piece {} to disk", piece.index);
+        let pieces_written = self.have_count.load(Ordering::Relaxed) + 1;
+        let missing_pieces: Vec<_> = self
+            .have
+            .iter()
+            .enumerate()
+            .map(|(i, val)| {
+                if val.load(Ordering::Relaxed) {
+                    -1
+                } else {
+                    i as isize
+                }
+            })
+            .filter(|x| *x >= 0)
+            .collect();
         if !is_valid_piece(&piece.piece, piece.index, &self.piece_hashes) {
             warn!("Piece {} has invalid hash", piece.index);
             failed_hash.send((piece.index, piece.piece.len())).unwrap();
             return;
         }
+        debug!(
+            "Writing piece {} to disk: have {}/{}, missing {:?}",
+            piece.index,
+            pieces_written,
+            self.piece_hashes.len(),
+            missing_pieces,
+        );
         let piece_begin_byte = piece.index * self.piece_length;
         let mut piece_current_byte = 0;
         let mut file_begin = 0;
@@ -384,7 +444,11 @@ impl FileSystemInfo {
             if end == piece.piece.len() {
                 file.flush().unwrap();
                 self.have[piece.index].store(true, Ordering::Relaxed);
-                self.have_count.fetch_add(1, Ordering::Relaxed);
+                if self.have_count.fetch_add(1, Ordering::Relaxed) == self.piece_hashes.len() - 1 {
+                    if let Some(sender) = completion_handler {
+                        sender.send(true).unwrap();
+                    }
+                };
                 have_send.send(Have { index: piece.index }).unwrap();
                 return;
             }

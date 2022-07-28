@@ -4,7 +4,7 @@ use std::sync::mpsc::Receiver;
 use std::time::Instant;
 
 use bit_vec::BitVec;
-use log::info;
+use log::{debug, info};
 use rand::seq::SliceRandom;
 use rand::thread_rng;
 
@@ -46,8 +46,9 @@ impl PieceAssigner {
                 pieces.push(piece_index)
             }
         }
+        info!("PieceAssigner: {} pieces to assign", pieces.len());
         pieces.shrink_to_fit();
-        pieces.shuffle(&mut thread_rng());
+        // pieces.shuffle(&mut thread_rng());
         Self {
             piece_info,
             pieces: pieces.into(),
@@ -107,9 +108,14 @@ impl PieceAssigner {
                 // Throttle calls to unreceived because they are expensive and blocks will likely
                 // be in flight
                 if self.prev_unreceived_call.elapsed() < std::time::Duration::from_secs(1) {
+                    info!("Throttling blocks requests sent");
                     return AssignedBlockResult::NoBlocksToAssign;
                 }
                 self.endgame_unreceived_blocks = unreceived();
+                info!(
+                    "endgame unreceived blocks: {}",
+                    self.endgame_unreceived_blocks.len()
+                );
                 self.prev_unreceived_call = Instant::now();
                 if self.endgame_unreceived_blocks.is_empty() {
                     info!("No more unreceived blocks!");
@@ -133,6 +139,7 @@ impl PieceAssigner {
                         self.pieces.retain(|x| *x != index);
                         index
                     } else {
+                        debug!("Peer does not have any blocks for me to request");
                         return AssignedBlockResult::NoBlocksToAssign;
                     }
                 }

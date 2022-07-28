@@ -32,17 +32,19 @@ fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = std::env::args().collect();
     // TODO validate args
     info!("Torrent file: {}", args[1]);
-    let torrent = Torrent::from_file(Path::new(&args[1]))?;
+    let torrent = Torrent::from_file(Path::new(&args[1]), Path::new(""))?;
     let config = ConnectionManagerConfig {
         listen_port: 6800,
         max_peers: 50,
+        seed: false,
+        print_output: true,
     };
     let tracker = TrackerClientImpl {
         address: torrent.metainfo.announce.clone(),
         listen_port: config.listen_port,
     };
     let mut manager = ConnectionManager::new(config);
-    manager.add_torrent(torrent, tracker)?;
+    manager.add_torrent(torrent, tracker, None)?;
     manager.run()?;
     info!("done!");
     Ok(())

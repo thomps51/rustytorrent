@@ -1,3 +1,4 @@
+use log::info;
 use std::io::Error;
 use std::io::Read;
 use std::io::Write;
@@ -34,6 +35,7 @@ impl Message for Request {
     }
 
     fn update(self, connection: &mut EstablishedConnection) -> UpdateResult {
+        log::debug!("Updating connection with request: {:?}", self);
         connection.pending_peer_requests.push(self);
         Ok(UpdateSuccess::Success)
     }
@@ -60,5 +62,9 @@ impl Request {
     }
     pub fn piece_index(&self) -> usize {
         self.index
+    }
+
+    pub fn offset(&self) -> usize {
+        self.begin
     }
 }

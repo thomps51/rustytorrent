@@ -2,6 +2,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::error::Error;
 use std::iter::FromIterator;
+use std::mem::take;
 use std::rc::Rc;
 use std::sync::mpsc;
 
@@ -13,13 +14,15 @@ use mio::{Events, Interest, Poll, Token};
 
 use super::piece_info::PieceInfo;
 use super::piece_store::{FileSystem, PieceStore};
-use super::{Connection, EstablishedConnection, HandshakeUpdateSuccess, UpdateSuccess};
+use super::{
+    CompletionHandler, Connection, EstablishedConnection, HandshakeUpdateSuccess, UpdateSuccess,
+};
 use super::{HandshakingConnection, PieceAssigner};
 use crate::client::connection::ConnectionBase;
 use crate::common::SharedPieceStore;
 use crate::common::Torrent;
 use crate::common::{Sha1Hash, SharedPieceAssigner};
-use crate::messages::Have;
+use crate::messages::{Bitfield, Have, Interested, Unchoke};
 use crate::tracker::{EventKind, PeerInfo, TrackerClient};
 
 const LISTENER: Token = Token(std::usize::MAX);
@@ -37,11 +40,15 @@ pub struct ConnectionManager<T: TrackerClient> {
     torrents: HashMap<Sha1Hash, TorrentData<T>>,
     config: ConnectionManagerConfig,
     stop: bool,
+    listener: TcpListener,
+    events: Events,
 }
 
 pub struct ConnectionManagerConfig {
     pub listen_port: u16,
     pub max_peers: usize,
+    pub seed: bool,
+    pub print_output: bool,
 }
 
 pub struct TorrentData<T: TrackerClient> {
@@ -60,6 +67,14 @@ impl<T: TrackerClient> ConnectionManager<T> {
     pub fn new(config: ConnectionManagerConfig) -> Self {
         let (send_have, recv_have) = mpsc::channel();
         let poll = Poll::new().unwrap();
+        let listener = TcpListener::bind(
+            format!("0.0.0.0:{}", config.listen_port)
+                .as_str()
+                .parse()
+                .unwrap(),
+        )
+        .unwrap();
+        let events = Events::with_capacity(1024);
         ConnectionManager {
             connections: HashMap::new(),
             downloaded: 0,
@@ -72,10 +87,17 @@ impl<T: TrackerClient> ConnectionManager<T> {
             torrents: HashMap::new(),
             config,
             stop: false,
+            listener,
+            events,
         }
     }
 
-    pub fn add_torrent(&mut self, torrent: Torrent, tracker: T) -> Result<(), Box<dyn Error>> {
+    pub fn add_torrent(
+        &mut self,
+        torrent: Torrent,
+        tracker: T,
+        completion_handler: Option<CompletionHandler>,
+    ) -> Result<(), Box<dyn Error>> {
         let num_pieces = torrent.metainfo.pieces.len();
         let piece_length = torrent.metainfo.piece_length;
         let (send, recv) = mpsc::channel();
@@ -86,7 +108,14 @@ impl<T: TrackerClient> ConnectionManager<T> {
             total_length: torrent.metainfo.total_size,
         };
         let piece_store: Rc<RefCell<_>> = Rc::new(RefCell::new(
-            FileSystem::new(&torrent, piece_info, send, self.send_have.clone()).unwrap(),
+            FileSystem::new(
+                &torrent,
+                piece_info,
+                send,
+                self.send_have.clone(),
+                completion_handler,
+            )
+            .unwrap(),
         ));
         let piece_assigner = Rc::new(RefCell::new(PieceAssigner::new(
             piece_info,
@@ -112,38 +141,147 @@ impl<T: TrackerClient> ConnectionManager<T> {
         Ok(())
     }
 
-    pub fn run(&mut self) -> Result<(), Box<dyn Error>> {
-        let mut events = Events::with_capacity(1024);
-        let mut listener = TcpListener::bind(
-            format!("0.0.0.0:{}", self.config.listen_port)
-                .as_str()
-                .parse()?,
-        )?;
+    pub fn start(&mut self) -> Result<(), Box<dyn Error>> {
         self.poll
             .registry()
-            .register(&mut listener, LISTENER, Interest::READABLE)?;
+            .register(&mut self.listener, LISTENER, Interest::READABLE)?;
         let mut torrents = self.torrents.drain().collect();
         for (_, torrent) in &mut torrents {
             self.add_peers(torrent);
         }
         self.torrents = torrents;
+        Ok(())
+    }
+
+    pub fn poll(&mut self) -> Result<(), Box<dyn Error>> {
+        self.maybe_print_info();
+        self.poll
+            .poll(&mut self.events, Some(std::time::Duration::from_secs(1)))?;
+        if self.events.is_empty() {
+            info!("Poll returned no events");
+        }
+        // let events = take(self.events);
+        for event in &self.events {
+            match event.token() {
+                LISTENER => loop {
+                    match self.listener.accept() {
+                        Ok((stream, _)) => {
+                            let mut peer = HandshakingConnection::new_from_incoming(
+                                stream,
+                                self.next_socket_index,
+                            );
+                            let token = Token(self.next_socket_index);
+                            self.next_socket_index += 1;
+                            peer.register(&mut self.poll, token, Interest::READABLE);
+                            self.connections
+                                .insert(token, Connection::Handshaking(peer));
+                        }
+                        Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                            break;
+                        }
+                        e => info!("Failed to accept peer: {:?}", e),
+                    }
+                },
+                token => {
+                    let peer = self.connections.get_mut(&token).unwrap();
+                    let handshake = match peer {
+                        Connection::Handshaking(connection) => {
+                            if event.is_writable() {
+                                // Writable means it is now connected
+                                connection.reregister(&mut self.poll, token, Interest::READABLE);
+                            }
+                            match connection.update() {
+                                Ok(status) => match status {
+                                    HandshakeUpdateSuccess::NoUpdate => {
+                                        continue;
+                                    }
+                                    HandshakeUpdateSuccess::Complete(handshake) => handshake,
+                                },
+                                Err(error) => {
+                                    info!("Removing peer {}: {} while updating", token.0, error);
+                                    connection.deregister(&mut self.poll);
+                                    self.connections.remove(&token);
+                                    continue;
+                                }
+                            }
+                        }
+                        Connection::Established(connection) => match connection.update() {
+                            Ok(status) => match status {
+                                UpdateSuccess::Transferred {
+                                    downloaded,
+                                    uploaded,
+                                } => {
+                                    self.downloaded += downloaded;
+                                    self.uploaded += uploaded;
+                                    continue;
+                                }
+                                UpdateSuccess::NoUpdate | UpdateSuccess::Success => {
+                                    continue;
+                                }
+                            },
+                            Err(error) => {
+                                info!("Removing peer {}: {} while updating", token.0, error);
+                                connection.deregister(&mut self.poll);
+                                self.connections.remove(&token);
+                                continue;
+                            }
+                        },
+                    };
+                    let torrent_data = self.torrents.get(&handshake.info_hash).unwrap(); // TODO make this unwrap safe by confirming we have the info_hash during the handshake
+                    let peer = self.connections.remove_entry(&token).unwrap().1;
+                    if let Connection::Handshaking(connection) = peer {
+                        let mut promoted = EstablishedConnection::new_from_handshaking(
+                            connection,
+                            torrent_data.piece_info.total_pieces,
+                            torrent_data.piece_assigner.clone(),
+                            torrent_data.piece_store.clone(),
+                        );
+                        // Same as above, factor out
+                        match promoted.update() {
+                            Ok(status) => match status {
+                                UpdateSuccess::Transferred {
+                                    downloaded,
+                                    uploaded,
+                                } => {
+                                    self.downloaded += downloaded;
+                                    self.uploaded += uploaded;
+                                }
+                                UpdateSuccess::NoUpdate | UpdateSuccess::Success => {}
+                            },
+                            Err(error) => {
+                                info!("Removing peer {}: {} while updating", token.0, error);
+                                promoted.deregister(&mut self.poll);
+                                self.connections.remove(&token);
+                            }
+                        }
+                        // fix these, as failing them should be handled like the rest of the errors here TODO
+                        info!("Bitfield: {:?}", torrent_data.piece_store.borrow().have());
+                        promoted
+                            .send(&Bitfield {
+                                bitfield: torrent_data.piece_store.borrow().have(),
+                            })
+                            .unwrap();
+                        promoted.send(&Unchoke {}).unwrap();
+                        promoted.send(&Interested {}).unwrap();
+                        self.connections
+                            .insert(token, Connection::Established(promoted));
+                    }
+                }
+            }
+        }
+        self.send_haves();
+        Ok(())
+    }
+
+    pub fn run(&mut self) -> Result<(), Box<dyn Error>> {
+        self.start()?;
         // TODO:
         // If it has been reponse.interval time, re-announce to tracker
         // Don't allow incoming connections past 50 peers
         // Implement responding to block requests
         // Implement both sending and receiving of cancel messages
         loop {
-            self.maybe_print_info();
-            self.poll
-                .poll(&mut events, Some(std::time::Duration::from_secs(1)))?;
-            for event in &events {
-                match event.token() {
-                    LISTENER => self.accept_connections(&mut listener),
-                    token => {
-                        self.handle_event(token, Some(event));
-                    }
-                }
-            }
+            self.poll()?;
             // TODO: Can the download stall?  If no reads are happening, we won't ever request more.
             // E.g., the following series of events:
             // - Endgame mode starts
@@ -156,7 +294,6 @@ impl<T: TrackerClient> ConnectionManager<T> {
             // more pieces if they are under their limit.  We could do this if the Poll times out,
             // but then we could have a peer sending bad data that prevents that logic from being run.
             // So we need to do this only if we haven't made forward progress in a given amount of time.
-            self.send_haves();
             // if self.connections.len() < self.config.max_peers {
             //     for (_, torrent) in &self.torrents {
             //         self.add_peers(torrent);
@@ -193,33 +330,28 @@ impl<T: TrackerClient> ConnectionManager<T> {
     }
 
     // Accept incoming connections
-    fn accept_connections(&mut self, listener: &mut TcpListener) {
-        loop {
-            match listener.accept() {
-                Ok((stream, _)) => {
-                    // let num_pieces = self.torrent.metainfo.pieces.len();
-                    // let mut peer = EstablishedConnection::new_from_incoming(
-                    //     num_pieces,
-                    //     stream,
-                    //     self.piece_assigner.clone(),
-                    //     self.piece_store.clone(),
-                    //     self.torrent.metainfo.info_hash_raw,
-                    //     self.next_socket_index,
-                    // );
-                    let mut peer =
-                        HandshakingConnection::new_from_incoming(stream, self.next_socket_index);
-                    let token = Token(self.next_socket_index);
-                    self.next_socket_index += 1;
-                    peer.register(&mut self.poll, token, Interest::READABLE);
-                    self.connections
-                        .insert(token, Connection::Handshaking(peer));
-                }
-                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    break;
-                }
-                e => panic!("err={:?}", e),
-            }
-        }
+    // fn accept_connections(&mut self, listener: &mut TcpListener) {
+    //     loop {
+    //         match listener.accept() {
+    //             Ok((stream, _)) => {
+    //                 let mut peer =
+    //                     HandshakingConnection::new_from_incoming(stream, self.next_socket_index);
+    //                 let token = Token(self.next_socket_index);
+    //                 self.next_socket_index += 1;
+    //                 peer.register(&mut self.poll, token, Interest::READABLE);
+    //                 self.connections
+    //                     .insert(token, Connection::Handshaking(peer));
+    //             }
+    //             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+    //                 break;
+    //             }
+    //             e => panic!("err={:?}", e),
+    //         }
+    //     }
+    // }
+
+    fn stop(&mut self) {
+        self.stop = true;
     }
 
     // Connect to more peers if needed
@@ -310,68 +442,71 @@ impl<T: TrackerClient> ConnectionManager<T> {
     // }
 
     // Handle Poll event
-    fn handle_event(&mut self, token: Token, event: Option<&Event>) {
-        let peer = self.connections.get_mut(&token).unwrap();
-        let handshake = match peer {
-            Connection::Handshaking(connection) => {
-                if let Some(e) = event {
-                    if e.is_writable() {
-                        // Writable means it is now connected
-                        connection.reregister(&mut self.poll, token, Interest::READABLE);
-                    }
-                }
-                match connection.update() {
-                    Ok(status) => match status {
-                        HandshakeUpdateSuccess::NoUpdate => {
-                            return;
-                        }
-                        HandshakeUpdateSuccess::Complete(handshake) => handshake,
-                    },
-                    Err(error) => {
-                        info!("Removing peer {}: {} while updating", token.0, error);
-                        connection.deregister(&mut self.poll);
-                        self.connections.remove(&token);
-                        return;
-                    }
-                }
-            }
-            Connection::Established(connection) => match connection.update() {
-                Ok(status) => match status {
-                    UpdateSuccess::Transferred {
-                        downloaded,
-                        uploaded,
-                    } => {
-                        self.downloaded += downloaded;
-                        self.uploaded += uploaded;
-                        return;
-                    }
-                    UpdateSuccess::NoUpdate | UpdateSuccess::Success => {
-                        return;
-                    }
-                },
-                Err(error) => {
-                    info!("Removing peer {}: {} while updating", token.0, error);
-                    connection.deregister(&mut self.poll);
-                    self.connections.remove(&token);
-                    return;
-                }
-            },
-        };
-        let torrent_data = self.torrents.get(&handshake.info_hash).unwrap(); // TODO make this unwrap safe by confirming we have the info_hash during the handshake
-        let peer = self.connections.remove_entry(&token).unwrap().1;
-        if let Connection::Handshaking(connection) = peer {
-            let promoted = EstablishedConnection::new_from_handshaking(
-                connection,
-                torrent_data.piece_info.total_pieces,
-                torrent_data.piece_assigner.clone(),
-                torrent_data.piece_store.clone(),
-            );
-            self.connections
-                .insert(token, Connection::Established(promoted));
-        }
-    }
+    // fn handle_event(&mut self, token: Token, event: Option<&Event>) {
+    //     let peer = self.connections.get_mut(&token).unwrap();
+    //     let handshake = match peer {
+    //         Connection::Handshaking(connection) => {
+    //             if let Some(e) = event {
+    //                 if e.is_writable() {
+    //                     // Writable means it is now connected
+    //                     connection.reregister(&mut self.poll, token, Interest::READABLE);
+    //                 }
+    //             }
+    //             match connection.update() {
+    //                 Ok(status) => match status {
+    //                     HandshakeUpdateSuccess::NoUpdate => {
+    //                         return;
+    //                     }
+    //                     HandshakeUpdateSuccess::Complete(handshake) => handshake,
+    //                 },
+    //                 Err(error) => {
+    //                     info!("Removing peer {}: {} while updating", token.0, error);
+    //                     connection.deregister(&mut self.poll);
+    //                     self.connections.remove(&token);
+    //                     return;
+    //                 }
+    //             }
+    //         }
+    //         Connection::Established(connection) => match connection.update() {
+    //             Ok(status) => match status {
+    //                 UpdateSuccess::Transferred {
+    //                     downloaded,
+    //                     uploaded,
+    //                 } => {
+    //                     self.downloaded += downloaded;
+    //                     self.uploaded += uploaded;
+    //                     return;
+    //                 }
+    //                 UpdateSuccess::NoUpdate | UpdateSuccess::Success => {
+    //                     return;
+    //                 }
+    //             },
+    //             Err(error) => {
+    //                 info!("Removing peer {}: {} while updating", token.0, error);
+    //                 connection.deregister(&mut self.poll);
+    //                 self.connections.remove(&token);
+    //                 return;
+    //             }
+    //         },
+    //     };
+    //     let torrent_data = self.torrents.get(&handshake.info_hash).unwrap(); // TODO make this unwrap safe by confirming we have the info_hash during the handshake
+    //     let peer = self.connections.remove_entry(&token).unwrap().1;
+    //     if let Connection::Handshaking(connection) = peer {
+    //         let promoted = EstablishedConnection::new_from_handshaking(
+    //             connection,
+    //             torrent_data.piece_info.total_pieces,
+    //             torrent_data.piece_assigner.clone(),
+    //             torrent_data.piece_store.clone(),
+    //         );
+    //         self.connections
+    //             .insert(token, Connection::Established(promoted));
+    //     }
+    // }
 
     fn maybe_print_info(&mut self) {
+        if !self.config.print_output {
+            return;
+        }
         for (_, torrent) in &self.torrents {
             let now = std::time::Instant::now();
             if now - self.last_update > PRINT_UPDATE_TIME {
@@ -379,7 +514,7 @@ impl<T: TrackerClient> ConnectionManager<T> {
                 let upload_rate = (self.uploaded as f64) / ((1 << 20) as f64);
                 self.downloaded = 0;
                 self.uploaded = 0;
-                print!("{esc}[2J{esc}[1;1H", esc = 27 as char);
+                // print!("{esc}[2J{esc}[1;1H", esc = 27 as char);
                 let have = torrent.piece_store.borrow().have();
                 let ticks = 200;
                 let pieces_per_tick = have.len() / ticks;

@@ -10,6 +10,8 @@ pub use meta_info::*;
 pub mod torrent;
 pub use torrent::*;
 
+pub mod create_torrent;
+
 use std::rc::Rc;
 
 use crate::client::FileSystem;

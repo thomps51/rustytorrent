@@ -6,6 +6,7 @@ use mio::net::TcpStream;
 use mio::{Interest, Poll, Token};
 
 use super::block_manager::BlockManager;
+use crate::client::PieceStore;
 use crate::common::Sha1Hash;
 use crate::common::SharedPieceAssigner;
 use crate::common::SharedPieceStore;
@@ -105,21 +106,21 @@ impl ConnectionBase for HandshakingConnection {
                 }
                 let handshake_from_peer = Handshake::read_from(&mut self.read_buffer)?;
                 debug!("Got handshake from peer {}", self.id);
-                if handshake_from_peer.peer_id == PEER_ID.as_bytes() {
-                    // Self connection
-                    return Err(UpdateError::CommunicationError(
-                        std::io::ErrorKind::AlreadyExists.into(),
-                    ));
-                }
+                // if handshake_from_peer.peer_id == PEER_ID.as_bytes() {
+                //     // Self connection
+                //     return Err(UpdateError::CommunicationError(
+                //         std::io::ErrorKind::AlreadyExists.into(),
+                //     ));
+                // }
                 if let Type::Incoming = self.conn_type {
                     // TODO: reject if incoming hash does not match known torrent hash
                     let handshake_to_peer = Handshake::new(PEER_ID, &handshake_from_peer.info_hash);
                     handshake_to_peer.write_to(&mut self.stream)?;
                 }
-                let msg = Unchoke {};
-                msg.write_to(&mut self.stream)?;
-                let msg = Interested {};
-                msg.write_to(&mut self.stream)?;
+                // let msg = Unchoke {};
+                // msg.write_to(&mut self.stream)?;
+                // let msg = Interested {};
+                // msg.write_to(&mut self.stream)?;
                 self.state = HandshakingState::Done;
                 Ok(HandshakeUpdateSuccess::Complete(handshake_from_peer))
             }
@@ -202,10 +203,34 @@ impl ConnectionBase for EstablishedConnection {
         match self.state {
             State::Seeding => {
                 let read_result = self.read_all()?;
-                let to_send: Vec<Request> = self.pending_peer_requests.drain(..).collect();
-                for request in to_send {
-                    // don't bother checking result, if they give us TCP pushback, it's their own damn fault
-                    if !self.send(&request)? {
+                let mut to_send: Vec<Request> = self.pending_peer_requests.drain(..).collect();
+                let mut to_send_drain = to_send.drain(..);
+                loop {
+                    if let Some(request) = to_send_drain.next() {
+                        debug!("Processing request: {:?}", request);
+                        let data = if let Some(data) = self
+                            .block_manager
+                            .piece_store
+                            .borrow()
+                            .get_block(request.piece_index(), request.offset())
+                        {
+                            debug!("Got {} bytes for request", data.len());
+                            data
+                        } else {
+                            info!("failed to get requested piece: {:?}", request);
+                            continue;
+                        };
+                        let msg = Block {
+                            index: request.piece_index(),
+                            begin: request.offset(),
+                            block: data,
+                        };
+                        if !self.send(&msg)? {
+                            self.pending_peer_requests = to_send_drain.collect();
+                            info!("Got pushback, stopping sends");
+                            break;
+                        }
+                    } else {
                         break;
                     }
                 }
@@ -215,16 +240,44 @@ impl ConnectionBase for EstablishedConnection {
                 let read_result = self.read_all()?;
                 // Cancel requested Requests (TODO)
                 if !self.pending_peer_requests.is_empty() {
-                    let to_send: Vec<Request> = self.pending_peer_requests.drain(..).collect();
-                    for request in to_send {
-                        // don't bother checking result, if they give us TCP pushback, it's their own damn fault
-                        if !self.send(&request)? {
+                    let mut to_send: Vec<Request> = self.pending_peer_requests.drain(..).collect();
+                    let mut to_send_drain = to_send.drain(..);
+                    loop {
+                        if let Some(request) = to_send_drain.next() {
+                            debug!("Processing request: {:?}", request);
+                            let data = if let Some(data) = self
+                                .block_manager
+                                .piece_store
+                                .borrow()
+                                .get_block(request.piece_index(), request.offset())
+                            {
+                                debug!("Got {} bytes for request", data.len());
+                                data
+                            } else {
+                                info!("failed to get requested piece: {:?}", request);
+                                continue;
+                            };
+                            let msg = Block {
+                                index: request.piece_index(),
+                                begin: request.offset(),
+                                block: data,
+                            };
+                            if !self.send(&msg)? {
+                                self.pending_peer_requests = to_send_drain.collect();
+                                info!("Got pushback, stopping sends");
+                                break;
+                            }
+                        } else {
                             break;
                         }
                     }
                 }
                 if self.block_manager.piece_assigner.borrow().is_endgame() {
                     self.state = State::ConnectedEndgame;
+                    return Ok(read_result);
+                }
+                if self.block_manager.is_done() {
+                    self.state = State::Seeding;
                     return Ok(read_result);
                 }
                 debug!("Connection {} sending block requests", self.id);
@@ -371,6 +424,10 @@ impl EstablishedConnection {
 
     // True: message was used
     // False: message was dropped because of TCP pushback
+    // If we get pushback, we keep the remaining piece of the message that failed to send
+    // to send later so we don't send incomplete messages. If we do get pushback, this
+    // logic will always drop at least 1 message since we try to push out the remaining
+    // buffer at the expense of the next message we are trying to send.
     pub fn send<T: Message>(&mut self, message: &T) -> Result<bool, std::io::Error> {
         let mut result = false;
         if self.send_buffer.len() == 0 {
@@ -380,9 +437,40 @@ impl EstablishedConnection {
         match self.stream.write(&self.send_buffer) {
             Ok(sent) => {
                 if sent == self.send_buffer.len() {
+                    // debug!("Wrote all buffer");
                     self.send_buffer.clear();
                 } else {
+                    debug!("Wrote partial buffer");
                     self.send_buffer.drain(0..sent);
+                }
+            }
+            Err(error) => {
+                if error.kind() != std::io::ErrorKind::WouldBlock {
+                    return Err(error);
+                }
+                debug!("EWOULDBLOCK while sending on Connection {}", self.id);
+            }
+        }
+        Ok(result)
+    }
+
+    pub fn send_to<T: Message, W: Write>(
+        &self,
+        message: &T,
+        writer: &mut W,
+        mut send_buffer: &mut Vec<u8>,
+    ) -> Result<bool, std::io::Error> {
+        let mut result = false;
+        if send_buffer.len() == 0 {
+            message.write_to(&mut send_buffer).unwrap();
+            result = true;
+        }
+        match writer.write(&self.send_buffer) {
+            Ok(sent) => {
+                if sent == self.send_buffer.len() {
+                    send_buffer.clear();
+                } else {
+                    send_buffer.drain(0..sent);
                 }
             }
             Err(error) => {
@@ -391,21 +479,24 @@ impl EstablishedConnection {
                 }
             }
         }
-        //self.stream.flush()?;
         Ok(result)
     }
 
     fn send_block_requests(&mut self) -> UpdateResult {
         if !self.peer_choking {
+            info!("Peer is not choking");
             let sent = self.block_manager.send_block_requests(
                 &mut self.stream,
                 &self.peer_has,
                 self.id,
             )?;
             if sent == 0 {
+                info!("No block requests sent");
                 return Ok(UpdateSuccess::NoUpdate);
             }
             return Ok(UpdateSuccess::Success);
+        } else {
+            info!("Peer is choking");
         }
         Ok(UpdateSuccess::NoUpdate)
     }
