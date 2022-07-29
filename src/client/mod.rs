@@ -6,6 +6,12 @@ pub use block_manager::*;
 pub mod connection;
 pub use connection::*;
 
+pub mod handshaking_connection;
+pub use handshaking_connection::*;
+
+pub mod established_connection;
+pub use established_connection::*;
+
 pub mod connection_manager;
 pub use connection_manager::*;
 

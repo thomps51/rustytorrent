@@ -3,78 +3,125 @@ use super::DataKind;
 use super::Dictionary;
 use super::List;
 
+use std::io::Write;
 use std::vec::Vec;
 
 // TODO: much of this can be made faster by avoiding the many small allocations in the
 // bencode() functions, as well as removing the use of format!.
 // These should likely not consume self;
 
-pub trait Encode {
-    fn bencode(self) -> Vec<u8>;
+pub trait Encode: ToOwned {
+    fn bencode(&self) -> Vec<u8>;
+
+    fn bencode_to<T: Write>(&self, writer: &mut T) -> std::io::Result<()>;
+}
+
+impl Encode for &[u8] {
+    fn bencode(&self) -> Vec<u8> {
+        let mut result = Vec::new();
+        self.bencode_to(&mut result).unwrap();
+        result
+    }
+
+    fn bencode_to<T: Write>(&self, writer: &mut T) -> std::io::Result<()> {
+        write!(writer, "{}:", self.len())?;
+        writer.write_all(&self)?;
+        Ok(())
+    }
 }
 
 impl Encode for Data {
-    fn bencode(mut self) -> Vec<u8> {
+    fn bencode(&self) -> Vec<u8> {
         let mut result = Vec::new();
-        let size_as_str = self.len().to_string();
-        result.extend_from_slice(size_as_str.as_str().as_bytes());
-        result.push(':' as u8);
-        result.append(&mut self);
+        self.bencode_to(&mut result).unwrap();
         result
+    }
+
+    fn bencode_to<T: Write>(&self, writer: &mut T) -> std::io::Result<()> {
+        (&self[..]).bencode_to(writer)
     }
 }
 
 impl Encode for String {
-    fn bencode(self) -> Vec<u8> {
-        self.as_str().bencode()
+    fn bencode(&self) -> Vec<u8> {
+        self.as_bytes().bencode()
+    }
+
+    fn bencode_to<T: Write>(&self, writer: &mut T) -> std::io::Result<()> {
+        self.as_str().bencode_to(writer)
     }
 }
 
 impl Encode for &str {
-    fn bencode(self) -> Vec<u8> {
-        format!("{}:{}", self.len(), self).into_bytes()
+    fn bencode(&self) -> Vec<u8> {
+        self.as_bytes().bencode()
+    }
+
+    fn bencode_to<T: Write>(&self, writer: &mut T) -> std::io::Result<()> {
+        self.as_bytes().bencode_to(writer)
     }
 }
 
 impl Encode for i64 {
-    fn bencode(self) -> Vec<u8> {
+    fn bencode(&self) -> Vec<u8> {
         format!("i{}e", self).into_bytes()
+    }
+
+    fn bencode_to<T: Write>(&self, writer: &mut T) -> std::io::Result<()> {
+        write!(writer, "i{}e", self)?;
+        Ok(())
     }
 }
 
 impl Encode for List {
-    fn bencode(self) -> Vec<u8> {
+    fn bencode(&self) -> Vec<u8> {
         let mut result = Vec::new();
-        result.push('l' as u8);
-        for element in self {
-            result.append(&mut element.bencode());
-        }
-        result.push('e' as u8);
+        self.bencode_to(&mut result).unwrap();
         result
+    }
+
+    fn bencode_to<T: Write>(&self, writer: &mut T) -> std::io::Result<()> {
+        writer.write_all(&['l' as u8])?;
+        for element in self {
+            element.bencode_to(writer)?;
+        }
+        writer.write_all(&['e' as u8])?;
+        Ok(())
     }
 }
 
 impl Encode for Dictionary {
-    fn bencode(self) -> Vec<u8> {
+    fn bencode(&self) -> Vec<u8> {
         let mut result = Vec::new();
-        result.push('d' as u8);
-        for (key, value) in self.iter() {
-            //result.append(&mut key.bencode());
-            result.append(&mut (*key).clone().bencode());
-            result.append(&mut (*value).clone().bencode());
-        }
-        result.push('e' as u8);
+        self.bencode_to(&mut result).unwrap();
         result
+    }
+
+    fn bencode_to<T: Write>(&self, writer: &mut T) -> std::io::Result<()> {
+        writer.write_all(&['d' as u8])?;
+        for (key, value) in self.iter() {
+            key.bencode_to(writer)?;
+            value.bencode_to(writer)?;
+        }
+        writer.write_all(&['e' as u8])?;
+        Ok(())
     }
 }
 
+// Is there some way to make this nicer?
 impl Encode for DataKind {
-    fn bencode(self) -> Vec<u8> {
+    fn bencode(&self) -> Vec<u8> {
+        let mut result = Vec::new();
+        self.bencode_to(&mut result).unwrap();
+        result
+    }
+
+    fn bencode_to<T: Write>(&self, writer: &mut T) -> std::io::Result<()> {
         match self {
-            DataKind::Data(value) => value.bencode(),
-            DataKind::Integer(value) => value.bencode(),
-            DataKind::List(value) => value.bencode(),
-            DataKind::Dictionary(value) => value.bencode(),
+            DataKind::Data(value) => value.bencode_to(writer),
+            DataKind::Integer(value) => value.bencode_to(writer),
+            DataKind::List(value) => value.bencode_to(writer),
+            DataKind::Dictionary(value) => value.bencode_to(writer),
         }
     }
 }
@@ -101,7 +148,6 @@ mod tests {
     fn encode_list_test() {
         let expected = "l4:spam4:eggse";
         let result = vec![DataKind::Data("spam".into()), DataKind::Data("eggs".into())].bencode();
-        //assert_eq!(expected, result.as_slice());
         assert_eq!(expected, std::str::from_utf8(result.as_slice()).unwrap());
     }
     #[test]

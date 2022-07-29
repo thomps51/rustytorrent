@@ -1,4 +1,3 @@
-use log::info;
 use std::io::Error;
 use std::io::Read;
 use std::io::Write;

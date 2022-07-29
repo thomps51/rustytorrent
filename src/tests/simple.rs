@@ -65,45 +65,45 @@ fn create_random_file(size: usize) -> NamedTempFile {
     writer.into_inner().unwrap()
 }
 
-#[test]
-fn seeder_only() {
-    use crate::{
-        client::{ConnectionManager, ConnectionManagerConfig},
-        common::{create_torrent::create_torrent_metadata_from_path, Torrent},
-        tracker::TestTrackerClient,
-    };
-    use num_traits::pow;
+// #[test]
+// fn seeder_only() {
+//     use crate::{
+//         client::{ConnectionManager, ConnectionManagerConfig},
+//         common::{create_torrent::create_torrent_metadata_from_path, Torrent},
+//         tracker::TestTrackerClient,
+//     };
+//     use num_traits::pow;
 
-    let piece_length = pow(2, 18); // 256 K
-    let file = create_random_file(10_000_001);
-    let path = file.path().to_owned();
-    println!("Created random file at {:?}", path);
-    // let contents = std::fs::read(&path).unwrap();
-    // println!("file contents: {:?}", contents);
+//     let piece_length = pow(2, 18); // 256 K
+//     let file = create_random_file(10_000_001);
+//     let path = file.path().to_owned();
+//     println!("Created random file at {:?}", path);
+//     // let contents = std::fs::read(&path).unwrap();
+//     // println!("file contents: {:?}", contents);
 
-    let torrent_metadata = create_torrent_metadata_from_path(&path, "TEST", piece_length).unwrap();
-    let torrent =
-        Torrent::from_dictionary(torrent_metadata.clone(), path.parent().unwrap()).unwrap();
+//     let torrent_metadata = create_torrent_metadata_from_path(&path, "TEST", piece_length).unwrap();
+//     let torrent =
+//         Torrent::from_dictionary(torrent_metadata.clone(), path.parent().unwrap()).unwrap();
 
-    let mut seeder = ConnectionManager::new(ConnectionManagerConfig {
-        listen_port: 6800,
-        max_peers: 50,
-        seed: true,
-        print_output: false,
-    });
-    seeder
-        .add_torrent(torrent, TestTrackerClient::new_empty(), None)
-        .unwrap();
-    seeder.start().unwrap();
-    println!("Seeder started");
-    loop {
-        seeder.poll().unwrap();
-    }
-}
+//     let mut seeder = ConnectionManager::new(ConnectionManagerConfig {
+//         listen_port: 6800,
+//         max_peers: 50,
+//         seed: true,
+//         print_output: false,
+//     });
+//     seeder
+//         .add_torrent(torrent, TestTrackerClient::new_empty(), None)
+//         .unwrap();
+//     seeder.start().unwrap();
+//     println!("Seeder started");
+//     loop {
+//         seeder.poll().unwrap();
+//     }
+// }
 
 #[test]
 fn one_seeder_one_downloader() {
-    // let _lg = setup_env();
+    let _lg = setup_env();
     use crate::{
         client::{ConnectionManager, ConnectionManagerConfig},
         common::{create_torrent::create_torrent_metadata_from_path, Torrent},
@@ -156,7 +156,7 @@ fn one_seeder_one_downloader() {
             listen_port: 6801,
             max_peers: 50,
             seed: false,
-            print_output: true,
+            print_output: false,
         });
         downloader
             .add_torrent(

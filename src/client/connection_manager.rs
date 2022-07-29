@@ -2,7 +2,6 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::error::Error;
 use std::iter::FromIterator;
-use std::mem::take;
 use std::rc::Rc;
 use std::sync::mpsc;
 
@@ -15,7 +14,8 @@ use mio::{Events, Interest, Poll, Token};
 use super::piece_info::PieceInfo;
 use super::piece_store::{FileSystem, PieceStore};
 use super::{
-    CompletionHandler, Connection, EstablishedConnection, HandshakeUpdateSuccess, UpdateSuccess,
+    CompletionHandler, Connection, EstablishedConnection, HandshakeUpdateSuccess, UpdateError,
+    UpdateSuccess,
 };
 use super::{HandshakingConnection, PieceAssigner};
 use crate::client::connection::ConnectionBase;
@@ -145,12 +145,111 @@ impl<T: TrackerClient> ConnectionManager<T> {
         self.poll
             .registry()
             .register(&mut self.listener, LISTENER, Interest::READABLE)?;
+        // Avoid this drain
         let mut torrents = self.torrents.drain().collect();
         for (_, torrent) in &mut torrents {
             self.add_peers(torrent);
         }
         self.torrents = torrents;
         Ok(())
+    }
+
+    // Accept incoming connections
+    fn accept_connections(&mut self) {
+        loop {
+            match self.listener.accept() {
+                Ok((stream, _)) => {
+                    let mut peer =
+                        HandshakingConnection::new_from_incoming(stream, self.next_socket_index);
+                    let token = Token(self.next_socket_index);
+                    self.next_socket_index += 1;
+                    peer.register(&mut self.poll, token, Interest::READABLE);
+                    self.connections
+                        .insert(token, Connection::Handshaking(peer));
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    break;
+                }
+                e => panic!("err={:?}", e), // TODO: when does this fail?
+            }
+        }
+    }
+
+    fn handle_event(&mut self, event: Option<&Event>, token: Token) {
+        if let Err(error) = self.handle_event_inner(event, token) {
+            self.disconnect_peer(token, error);
+        }
+    }
+
+    fn handle_event_inner(
+        &mut self,
+        event: Option<&Event>,
+        token: Token,
+    ) -> Result<(), UpdateError> {
+        let peer = self.connections.get_mut(&token).unwrap();
+        let handshake = match peer {
+            Connection::Handshaking(connection) => {
+                if let Some(event) = event {
+                    // Writable means it is now connected
+                    if event.is_writable() {
+                        connection.reregister(&mut self.poll, token, Interest::READABLE);
+                    }
+                }
+                match connection.update()? {
+                    HandshakeUpdateSuccess::NoUpdate => {
+                        return Ok(());
+                    }
+                    HandshakeUpdateSuccess::Complete(handshake) => handshake,
+                }
+            }
+            Connection::Established(connection) => match connection.update()? {
+                UpdateSuccess::Transferred {
+                    downloaded,
+                    uploaded,
+                } => {
+                    self.downloaded += downloaded;
+                    self.uploaded += uploaded;
+                    return Ok(());
+                }
+                UpdateSuccess::NoUpdate | UpdateSuccess::Success => {
+                    return Ok(());
+                }
+            },
+        };
+        let torrent_data = if let Some(torrent_data) = self.torrents.get(&handshake.info_hash) {
+            torrent_data
+        } else {
+            return Err(UpdateError::TorrentNotManaged {
+                info_hash: handshake.info_hash,
+            });
+        };
+        let peer = self.connections.remove_entry(&token).unwrap().1;
+        if let Connection::Handshaking(connection) = peer {
+            let mut promoted = EstablishedConnection::new(
+                token.0,
+                connection.into_stream(),
+                torrent_data.piece_info.total_pieces,
+                torrent_data.piece_assigner.clone(),
+                torrent_data.piece_store.clone(),
+            );
+            promoted.send(&Bitfield {
+                bitfield: torrent_data.piece_store.borrow().have(),
+            })?;
+            promoted.send(&Unchoke {})?;
+            promoted.send(&Interested {})?;
+            self.connections
+                .insert(token, Connection::Established(promoted));
+        }
+        // Need to call update logic on promoted connection in case we missed reading any messages
+        self.handle_event(None, token);
+        Ok(())
+    }
+
+    fn disconnect_peer(&mut self, token: Token, error: UpdateError) {
+        info!("Removing peer {}: {} while updating", token.0, error);
+        let connection = self.connections.get_mut(&token).unwrap();
+        connection.deregister(&mut self.poll);
+        self.connections.remove(&token);
     }
 
     pub fn poll(&mut self) -> Result<(), Box<dyn Error>> {
@@ -160,115 +259,15 @@ impl<T: TrackerClient> ConnectionManager<T> {
         if self.events.is_empty() {
             info!("Poll returned no events");
         }
-        // let events = take(self.events);
-        for event in &self.events {
+        let mut events = Events::with_capacity(0); // Inner structure is a Vec, so this will not allocate
+        std::mem::swap(&mut events, &mut self.events);
+        for event in &events {
             match event.token() {
-                LISTENER => loop {
-                    match self.listener.accept() {
-                        Ok((stream, _)) => {
-                            let mut peer = HandshakingConnection::new_from_incoming(
-                                stream,
-                                self.next_socket_index,
-                            );
-                            let token = Token(self.next_socket_index);
-                            self.next_socket_index += 1;
-                            peer.register(&mut self.poll, token, Interest::READABLE);
-                            self.connections
-                                .insert(token, Connection::Handshaking(peer));
-                        }
-                        Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                            break;
-                        }
-                        e => info!("Failed to accept peer: {:?}", e),
-                    }
-                },
-                token => {
-                    let peer = self.connections.get_mut(&token).unwrap();
-                    let handshake = match peer {
-                        Connection::Handshaking(connection) => {
-                            if event.is_writable() {
-                                // Writable means it is now connected
-                                connection.reregister(&mut self.poll, token, Interest::READABLE);
-                            }
-                            match connection.update() {
-                                Ok(status) => match status {
-                                    HandshakeUpdateSuccess::NoUpdate => {
-                                        continue;
-                                    }
-                                    HandshakeUpdateSuccess::Complete(handshake) => handshake,
-                                },
-                                Err(error) => {
-                                    info!("Removing peer {}: {} while updating", token.0, error);
-                                    connection.deregister(&mut self.poll);
-                                    self.connections.remove(&token);
-                                    continue;
-                                }
-                            }
-                        }
-                        Connection::Established(connection) => match connection.update() {
-                            Ok(status) => match status {
-                                UpdateSuccess::Transferred {
-                                    downloaded,
-                                    uploaded,
-                                } => {
-                                    self.downloaded += downloaded;
-                                    self.uploaded += uploaded;
-                                    continue;
-                                }
-                                UpdateSuccess::NoUpdate | UpdateSuccess::Success => {
-                                    continue;
-                                }
-                            },
-                            Err(error) => {
-                                info!("Removing peer {}: {} while updating", token.0, error);
-                                connection.deregister(&mut self.poll);
-                                self.connections.remove(&token);
-                                continue;
-                            }
-                        },
-                    };
-                    let torrent_data = self.torrents.get(&handshake.info_hash).unwrap(); // TODO make this unwrap safe by confirming we have the info_hash during the handshake
-                    let peer = self.connections.remove_entry(&token).unwrap().1;
-                    if let Connection::Handshaking(connection) = peer {
-                        let mut promoted = EstablishedConnection::new_from_handshaking(
-                            connection,
-                            torrent_data.piece_info.total_pieces,
-                            torrent_data.piece_assigner.clone(),
-                            torrent_data.piece_store.clone(),
-                        );
-                        // Same as above, factor out
-                        match promoted.update() {
-                            Ok(status) => match status {
-                                UpdateSuccess::Transferred {
-                                    downloaded,
-                                    uploaded,
-                                } => {
-                                    self.downloaded += downloaded;
-                                    self.uploaded += uploaded;
-                                }
-                                UpdateSuccess::NoUpdate | UpdateSuccess::Success => {}
-                            },
-                            Err(error) => {
-                                info!("Removing peer {}: {} while updating", token.0, error);
-                                promoted.deregister(&mut self.poll);
-                                self.connections.remove(&token);
-                            }
-                        }
-                        // fix these, as failing them should be handled like the rest of the errors here TODO
-                        info!("Bitfield: {:?}", torrent_data.piece_store.borrow().have());
-                        promoted
-                            .send(&Bitfield {
-                                bitfield: torrent_data.piece_store.borrow().have(),
-                            })
-                            .unwrap();
-                        promoted.send(&Unchoke {}).unwrap();
-                        promoted.send(&Interested {}).unwrap();
-                        self.connections
-                            .insert(token, Connection::Established(promoted));
-                    }
-                }
+                LISTENER => self.accept_connections(),
+                token => self.handle_event(Some(event), token),
             }
         }
+        std::mem::swap(&mut events, &mut self.events);
         self.send_haves();
         Ok(())
     }
@@ -416,91 +415,6 @@ impl<T: TrackerClient> ConnectionManager<T> {
     //         connections.push(peer);
     //     }
     //     connections
-    // }
-
-    // fn handle_event_impl<T: ConnectionBase>(
-    //     &mut self,
-    //     peer: &mut T,
-    //     token: Token,
-    //     event: Option<&Event>,
-    // ) -> T::UpdateSuccessType {
-    //     if let Some(e) = event {
-    //         if e.is_writable() {
-    //             // Writable means it is now connected
-    //             peer.reregister(&mut self.poll, token, Interest::READABLE);
-    //         }
-    //     }
-    //     match peer.update() {
-    //         Ok(status) => status,
-    //         Err(error) => {
-    //             info!("Removing peer {}: {} while updating", token.0, error);
-    //             peer.deregister(&mut self.poll);
-    //             self.connections.remove(&token);
-    //             T::UpdateSuccessType::default()
-    //         }
-    //     }
-    // }
-
-    // Handle Poll event
-    // fn handle_event(&mut self, token: Token, event: Option<&Event>) {
-    //     let peer = self.connections.get_mut(&token).unwrap();
-    //     let handshake = match peer {
-    //         Connection::Handshaking(connection) => {
-    //             if let Some(e) = event {
-    //                 if e.is_writable() {
-    //                     // Writable means it is now connected
-    //                     connection.reregister(&mut self.poll, token, Interest::READABLE);
-    //                 }
-    //             }
-    //             match connection.update() {
-    //                 Ok(status) => match status {
-    //                     HandshakeUpdateSuccess::NoUpdate => {
-    //                         return;
-    //                     }
-    //                     HandshakeUpdateSuccess::Complete(handshake) => handshake,
-    //                 },
-    //                 Err(error) => {
-    //                     info!("Removing peer {}: {} while updating", token.0, error);
-    //                     connection.deregister(&mut self.poll);
-    //                     self.connections.remove(&token);
-    //                     return;
-    //                 }
-    //             }
-    //         }
-    //         Connection::Established(connection) => match connection.update() {
-    //             Ok(status) => match status {
-    //                 UpdateSuccess::Transferred {
-    //                     downloaded,
-    //                     uploaded,
-    //                 } => {
-    //                     self.downloaded += downloaded;
-    //                     self.uploaded += uploaded;
-    //                     return;
-    //                 }
-    //                 UpdateSuccess::NoUpdate | UpdateSuccess::Success => {
-    //                     return;
-    //                 }
-    //             },
-    //             Err(error) => {
-    //                 info!("Removing peer {}: {} while updating", token.0, error);
-    //                 connection.deregister(&mut self.poll);
-    //                 self.connections.remove(&token);
-    //                 return;
-    //             }
-    //         },
-    //     };
-    //     let torrent_data = self.torrents.get(&handshake.info_hash).unwrap(); // TODO make this unwrap safe by confirming we have the info_hash during the handshake
-    //     let peer = self.connections.remove_entry(&token).unwrap().1;
-    //     if let Connection::Handshaking(connection) = peer {
-    //         let promoted = EstablishedConnection::new_from_handshaking(
-    //             connection,
-    //             torrent_data.piece_info.total_pieces,
-    //             torrent_data.piece_assigner.clone(),
-    //             torrent_data.piece_store.clone(),
-    //         );
-    //         self.connections
-    //             .insert(token, Connection::Established(promoted));
-    //     }
     // }
 
     fn maybe_print_info(&mut self) {
