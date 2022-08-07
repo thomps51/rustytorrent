@@ -14,7 +14,6 @@ pub enum DataKind {
 }
 
 pub type Data = Vec<u8>;
-// pub type Dictionary = BTreeMap<String, DataKind>;
 pub type List = Vec<DataKind>;
 
 #[derive(Debug, PartialEq, Clone)]

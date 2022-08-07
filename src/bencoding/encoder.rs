@@ -6,10 +6,6 @@ use super::List;
 use std::io::Write;
 use std::vec::Vec;
 
-// TODO: much of this can be made faster by avoiding the many small allocations in the
-// bencode() functions, as well as removing the use of format!.
-// These should likely not consume self;
-
 pub trait Encode: ToOwned {
     fn bencode(&self) -> Vec<u8>;
 

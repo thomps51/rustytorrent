@@ -1,7 +1,6 @@
-use mio::Poll;
-
 use super::EstablishedConnection;
 use super::HandshakingConnection;
+use super::NetworkSource;
 use crate::common::Sha1Hash;
 
 pub enum Connection {
@@ -10,10 +9,10 @@ pub enum Connection {
 }
 
 impl Connection {
-    pub fn deregister(&mut self, poll: &mut Poll) {
+    pub fn into_network_source(self) -> NetworkSource {
         match self {
-            Connection::Handshaking(c) => c.deregister(poll),
-            Connection::Established(c) => c.deregister(poll),
+            Connection::Handshaking(c) => c.into_network_source(),
+            Connection::Established(c) => c.into_network_source(),
         }
     }
 }
@@ -21,9 +20,9 @@ impl Connection {
 pub trait ConnectionBase: Sized {
     type UpdateSuccessType: Default;
 
-    fn deregister(&mut self, poll: &mut Poll);
-
     fn update(&mut self) -> Result<Self::UpdateSuccessType, UpdateError>;
+
+    fn into_network_source(self) -> NetworkSource;
 }
 
 pub type UpdateResult = Result<UpdateSuccess, UpdateError>;
@@ -45,6 +44,7 @@ pub enum UpdateError {
     UnknownMessage { id: i8 },
     IndexOutOfBounds,
     TorrentNotManaged { info_hash: Sha1Hash },
+    PeerRemoved,
 }
 
 impl std::error::Error for UpdateError {}

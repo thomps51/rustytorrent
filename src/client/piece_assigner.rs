@@ -1,6 +1,5 @@
 use std::collections::hash_map::Entry::Occupied;
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::mpsc::Receiver;
 use std::time::Instant;
 
 use bit_vec::BitVec;
@@ -19,7 +18,6 @@ pub struct PieceAssigner {
     pub piece_info: PieceInfo,
     pieces: VecDeque<usize>,
     left: BitVec,
-    failed_hash: Receiver<(usize, usize)>,
     endgame: bool,
     current_piece: Option<usize>,
     current_block: usize,
@@ -39,7 +37,7 @@ pub enum AssignedBlockResult {
 // 'endgame mode'
 
 impl PieceAssigner {
-    pub fn new(piece_info: PieceInfo, failed_hash: Receiver<(usize, usize)>, have: BitVec) -> Self {
+    pub fn new(piece_info: PieceInfo, have: &BitVec) -> Self {
         let mut pieces = Vec::with_capacity(piece_info.total_pieces);
         for (piece_index, value) in have.iter().enumerate() {
             if !value {
@@ -53,7 +51,6 @@ impl PieceAssigner {
             piece_info,
             pieces: pieces.into(),
             left: BitVec::from_elem(piece_info.total_pieces, true),
-            failed_hash,
             endgame: false,
             current_piece: None,
             current_block: 0,
@@ -61,6 +58,10 @@ impl PieceAssigner {
             endgame_unreceived_blocks: Vec::new(),
             prev_unreceived_call: Instant::now(),
         }
+    }
+
+    pub fn add_piece(&mut self, piece_index: usize) {
+        self.pieces.push_back(piece_index);
     }
 
     pub fn clear(&mut self) {
@@ -74,6 +75,7 @@ impl PieceAssigner {
         unreceived: F,
     ) -> AssignedBlockResult {
         if self.endgame_unreceived_blocks.len() > 0 {
+            self.endgame = true;
             let pieces_assigned = self.assigned.entry(connection_id).or_default();
             let mut request = None;
             for (pos, block_request) in self.endgame_unreceived_blocks.iter().enumerate() {
@@ -101,9 +103,6 @@ impl PieceAssigner {
             return AssignedBlockResult::EndgameAssignedBlock { request };
         }
         if self.pieces.len() == 0 && self.current_piece.is_none() {
-            while let Ok((value, _length)) = self.failed_hash.try_recv() {
-                self.pieces.push_back(value);
-            }
             if self.pieces.len() == 0 {
                 // Throttle calls to unreceived because they are expensive and blocks will likely
                 // be in flight

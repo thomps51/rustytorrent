@@ -50,7 +50,7 @@ impl Message for Block {
     }
 
     fn write_data<T: Write>(&self, writer: &mut T) -> Result<(), Error> {
-        log::info!(
+        log::debug!(
             "Writing Block message, index: {}, begin: {}, size: {}",
             self.index,
             self.begin,
@@ -74,7 +74,7 @@ impl Block {
         let index = read_as_be::<u32, _, usize>(reader)?;
         let begin = read_as_be::<u32, _, usize>(reader)?;
         let size = length - 9; // id byte, 2 4-byte sizes
-        log::info!(
+        log::debug!(
             "Reading and updating from Block message, index: {}, begin: {}, size: {}",
             index,
             begin,

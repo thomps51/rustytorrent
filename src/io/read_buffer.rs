@@ -92,10 +92,7 @@ impl ReadBuffer {
                 return Err(error);
             }
         };
-        if read < need_to_read {
-            return Ok(false);
-        }
-        Ok(true)
+        Ok(read >= need_to_read)
     }
 
     pub fn shift(&mut self) {

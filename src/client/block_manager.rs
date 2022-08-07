@@ -6,9 +6,8 @@ use std::io::prelude::*;
 use bit_vec::BitVec;
 
 use super::piece_assigner::AssignedBlockResult;
-use super::PieceStore;
+use crate::common::SharedBlockCache;
 use crate::common::SharedPieceAssigner;
-use crate::common::SharedPieceStore;
 use crate::messages::*;
 
 // Stats for Vuze
@@ -37,35 +36,30 @@ pub const MAX_OPEN_REQUESTS_PER_PEER: usize = 10;
 pub struct BlockManager {
     pub blocks_in_flight: usize,
     pub piece_assigner: SharedPieceAssigner,
-    pub piece_store: SharedPieceStore,
     endgame_sent_blocks: HashMap<usize, BitVec>,
+    pub block_cache: SharedBlockCache,
 }
 
 impl BlockManager {
-    pub fn new(piece_assigner: SharedPieceAssigner, piece_store: SharedPieceStore) -> Self {
+    pub fn new(piece_assigner: SharedPieceAssigner, block_cache: SharedBlockCache) -> Self {
         BlockManager {
             blocks_in_flight: 0,
             piece_assigner,
-            piece_store,
             endgame_sent_blocks: HashMap::new(),
+            block_cache,
         }
     }
     pub fn add_block<T: Read>(&mut self, data: BlockReader<T>) -> Result<(), std::io::Error> {
         if !self.piece_assigner.borrow().is_endgame() {
+            // TODO: be smarter about this count and endgame in general
             self.blocks_in_flight -= 1;
         }
-        self.piece_store.borrow_mut().write_block(data)?;
+        let piece_index = data.piece_index();
+        // If write_block fails, that means the hash failed and we need to add it back to piece_assigner
+        if let Err(_) = self.block_cache.borrow_mut().write_block(data) {
+            self.piece_assigner.borrow_mut().add_piece(piece_index);
+        }
         Ok(())
-    }
-
-    pub fn bitfield(&self) -> Bitfield {
-        let have = self.piece_store.borrow().have();
-        debug!("Creating Bitfield with length: {}", have.len());
-        Bitfield { bitfield: have }
-    }
-
-    pub fn is_done(&self) -> bool {
-        self.piece_store.borrow().done()
     }
 
     pub fn send_block_requests<T: Write>(
@@ -78,9 +72,8 @@ impl BlockManager {
         let mut is_endgame = false;
         let mut piece_assigner = self.piece_assigner.borrow_mut();
         while self.blocks_in_flight < MAX_OPEN_REQUESTS_PER_PEER {
-            info!("send_block_requests loop");
             match piece_assigner.get_block(&peer_has, id, || {
-                self.piece_store.borrow().endgame_get_unreceived_blocks()
+                self.block_cache.borrow().endgame_get_unreceived_blocks()
             }) {
                 AssignedBlockResult::NoBlocksToAssign => {
                     info!("no blocks to assign");
@@ -110,9 +103,9 @@ impl BlockManager {
         }
         if is_endgame {
             let (blocks_in_flight, cancels) = self
-                .piece_store
+                .block_cache
                 .borrow()
-                .endgame_reconcile(&mut self.endgame_sent_blocks);
+                .reconcile(&mut self.endgame_sent_blocks);
             self.blocks_in_flight = blocks_in_flight;
             for cancel in cancels {
                 cancel.write_to(stream)?;

@@ -1,3 +1,4 @@
+use std::convert::TryInto;
 use std::error::Error;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::str::FromStr;
@@ -6,26 +7,41 @@ use log::{debug, info};
 use reqwest;
 
 use crate::bencoding;
-use crate::common::Torrent;
 use crate::common::PEER_ID;
+use crate::common::PEER_ID_LENGTH;
 
-pub trait TrackerClient: Sized {
+pub trait TrackerClient {
+    // fn announce(
+    //     &self,
+    //     meta_info: &Torrent,
+    //     kind: EventKind,
+    // ) -> Result<TrackerResponse, Box<dyn Error>>;
     fn announce(
-        &self,
-        torrent: &Torrent,
+        &mut self,
+        upload: usize,
+        download: usize,
+        left: usize,
+        listen_port: u16,
+        info_hash_uri: &str,
+        peer_id: &str,
         kind: EventKind,
     ) -> Result<TrackerResponse, Box<dyn Error>>;
 }
 
 pub struct TrackerClientImpl {
     pub address: String,
-    pub listen_port: u16,
 }
 
 #[derive(Debug, Clone)]
 pub struct PeerInfo {
     pub addr: SocketAddr,
-    pub id: Option<Vec<u8>>,
+    pub id: Option<[u8; PEER_ID_LENGTH]>,
+}
+
+impl PeerInfo {
+    pub fn new_from_addr(addr: SocketAddr) -> Self {
+        Self { addr, id: None }
+    }
 }
 
 pub type PeerInfoList = Vec<PeerInfo>;
@@ -36,6 +52,7 @@ pub struct TrackerResponse {
     pub interval: i64,
 }
 
+#[derive(Debug)]
 pub enum EventKind {
     Started,
     Completed,
@@ -57,20 +74,30 @@ impl EventKind {
 impl TrackerClient for TrackerClientImpl {
     // make this async for updates other than the first?
     // probably needs tracker-specific errors instead of just parse errors
+    // fn announce(
+    //     &self,
+    //     torrent: &Torrent,
+    //     kind: EventKind,
+    // ) -> Result<TrackerResponse, Box<dyn Error>> {
     fn announce(
-        &self,
-        torrent: &Torrent,
+        &mut self,
+        upload: usize,
+        download: usize,
+        left: usize,
+        listen_port: u16,
+        info_hash_uri: &str,
+        peer_id: &str,
         kind: EventKind,
     ) -> Result<TrackerResponse, Box<dyn Error>> {
         debug_assert_eq!(PEER_ID.len(), 20);
         let encoded = format!(
             "info_hash={}&peer_id={}&port={}&uploaded={}&downloaded={}&left={}&event={}",
-            torrent.metainfo.info_hash_uri,
-            PEER_ID,
-            self.listen_port.to_string(),
-            torrent.downloaded.to_string(),
-            torrent.uploaded.to_string(),
-            torrent.left.to_string(),
+            info_hash_uri,
+            peer_id,
+            listen_port,
+            download,
+            upload,
+            left,
             kind.to_str(),
         );
 
@@ -97,7 +124,10 @@ impl TrackerClient for TrackerClientImpl {
                     let ip_address = IpAddr::from_str(ip)?;
                     let addr = SocketAddr::new(ip_address, port as u16);
                     debug!("ip: {}, port: {}, id {:?}", ip, port, id);
-                    peer_list.push(PeerInfo { addr, id: Some(id) });
+                    peer_list.push(PeerInfo {
+                        addr,
+                        id: Some(id.try_into().unwrap()), // TODO: Fix unwrap
+                    });
                 }
             }
             bencoding::DataKind::Data(compact_peer_list) => {

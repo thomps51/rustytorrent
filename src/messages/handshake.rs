@@ -19,10 +19,10 @@ impl Handshake {
     pub const PSTR: &'static [u8] = "BitTorrent protocol".as_bytes();
     pub const SIZE: u8 = 49 + Self::PSTR.len() as u8;
 
-    pub fn new(peer_id: &str, info_hash: &Sha1Hash) -> Self {
+    pub fn new(peer_id: &[u8], info_hash: &Sha1Hash) -> Self {
         let mut result: Self = Default::default();
         result.info_hash = *info_hash;
-        result.peer_id.copy_from_slice(peer_id.as_bytes());
+        result.peer_id.copy_from_slice(peer_id);
         result.reserved = [0, 0, 0, 0, 0, 0, 0, 0];
         result
     }

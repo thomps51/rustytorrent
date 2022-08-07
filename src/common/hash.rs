@@ -26,3 +26,9 @@ pub fn hash_to_bytes(data: &[u8]) -> Sha1Hash {
     let hash = hasher.finalize();
     hash.into()
 }
+
+pub fn is_valid_piece(piece: &[u8], index: usize, piece_hashes: &Vec<Sha1Hash>) -> bool {
+    let actual = hash_to_bytes(piece);
+    let expected = piece_hashes[index];
+    actual == expected
+}

@@ -1,6 +1,5 @@
 use crate::bencoding::*;
 use std::error::Error;
-use std::io::prelude::*;
 use std::path::Path;
 use std::{
     fs::File,
@@ -57,8 +56,6 @@ pub fn create_torrent_from_path(
 ) -> Result<(), Box<dyn Error>> {
     let data = create_torrent_metadata_from_path(path, tracker, piece_length)?;
     let mut file = File::create(destination)?;
-    // let data = data.bencode();
-    // file.write_all(&data)?;
     data.bencode_to(&mut file)?;
     Ok(())
 }

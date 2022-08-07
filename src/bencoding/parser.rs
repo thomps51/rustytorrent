@@ -9,7 +9,6 @@ use data_kind::Dictionary;
 pub struct Parser<'a> {
     current_index: usize,
     data: &'a [u8],
-    //error: String,
 }
 
 impl<'a> Parser<'a> {
@@ -33,7 +32,7 @@ impl<'a> Parser<'a> {
             index,
             String::from_utf8_lossy(&self.data[index..right])
         );
-        ParseError { kind, message }
+        ParseError { message }
     }
 
     fn get_length_prefix(&self, data: &[u8]) -> Result<(usize, usize), ParseError> {
@@ -173,6 +172,8 @@ pub fn parse_into_dictionary(
 ) -> Result<Dictionary, Box<dyn std::error::Error>> {
     let mut file = std::fs::File::open(torrent_file)?;
     let mut buffer = Vec::new();
+    // TODO: don't load the file all into a buffer.  I once accidentally opened a iso as a torrent and it spun here for a while.
+    // at least maybe constrain to .torrent files
     file.read_to_end(&mut buffer)?;
     let result = parse(&buffer).unwrap();
     if let DataKind::Dictionary(value) = result {
@@ -192,7 +193,6 @@ enum ParseErrorKind {
 
 #[derive(Debug)]
 pub struct ParseError {
-    kind: ParseErrorKind,
     message: String,
 }
 

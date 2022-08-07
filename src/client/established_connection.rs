@@ -1,36 +1,37 @@
 use std::io::prelude::*;
+use std::sync::mpsc::Sender;
 
 use bit_vec::BitVec;
 use log::{debug, info};
-use mio::net::TcpStream;
-use mio::Poll;
+use mio::Token;
 
 use super::block_manager::BlockManager;
-use super::{ConnectionBase, UpdateError, UpdateResult, UpdateSuccess};
-use crate::client::PieceStore;
-use crate::common::SharedPieceAssigner;
-use crate::common::SharedPieceStore;
+use super::disk_manager::DiskRequest;
+use super::{ConnectionBase, NetworkSource, UpdateError, UpdateResult, UpdateSuccess};
+use crate::common::{Sha1Hash, SharedBlockCache, SharedCount, SharedPieceAssigner};
 use crate::io::ReadBuffer;
 use crate::messages::*;
 
 pub struct EstablishedConnection {
-    am_choking: bool,
-    am_interested: bool,
+    pub info_hash: Sha1Hash,
+    pub am_choking: bool,
+    pub am_interested: bool,
     pub id: usize,
     pub peer_choking: bool,
     pub peer_interested: bool,
     pub peer_has: BitVec,
-    stream: TcpStream,
+    stream: NetworkSource,
     last_keep_alive: std::time::Instant,
     block_manager: BlockManager,
-    pub pending_peer_requests: Vec<Request>,
     pub pending_peer_cancels: Vec<Cancel>,
     next_message_length: Option<usize>,
-    read_buffer: ReadBuffer,
+    read_buffer: ReadBuffer, // TODO: Each connection doesn't need this, all the connections could share one
     send_buffer: Vec<u8>,
     pub num_pieces: usize,
     state: State,
-    pub downloaded: usize,
+    pub downloaded: SharedCount,
+    pub uploaded: SharedCount,
+    disk_requester: Sender<DiskRequest>,
 }
 
 pub enum State {
@@ -48,12 +49,17 @@ fn read_byte_from<T: Read>(stream: &mut T) -> Result<u8, std::io::Error> {
 impl EstablishedConnection {
     pub fn new(
         id: usize,
-        stream: TcpStream,
+        info_hash: Sha1Hash,
+        stream: NetworkSource,
         num_pieces: usize,
         piece_assigner: SharedPieceAssigner,
-        piece_store: SharedPieceStore,
+        disk_requester: Sender<DiskRequest>,
+        block_cache: SharedBlockCache,
+        downloaded: SharedCount,
+        uploaded: SharedCount,
     ) -> Self {
         Self {
+            info_hash,
             am_choking: true,
             am_interested: false,
             id,
@@ -62,15 +68,16 @@ impl EstablishedConnection {
             peer_has: BitVec::from_elem(num_pieces, false),
             stream,
             last_keep_alive: std::time::Instant::now(),
-            block_manager: BlockManager::new(piece_assigner, piece_store),
-            pending_peer_requests: Vec::new(),
+            block_manager: BlockManager::new(piece_assigner, block_cache),
             pending_peer_cancels: Vec::new(),
             next_message_length: None,
             read_buffer: ReadBuffer::new(1 << 20), // 1 MiB
             send_buffer: Vec::new(),
             num_pieces,
             state: State::ConnectedNormal,
-            downloaded: 0,
+            downloaded,
+            uploaded,
+            disk_requester,
         }
     }
 
@@ -129,7 +136,7 @@ impl EstablishedConnection {
             Port
         );
         self.next_message_length = None;
-        self.downloaded += total_read;
+        *self.downloaded.borrow_mut() += total_read;
         match retval {
             Ok(UpdateSuccess::Success) => Ok(UpdateSuccess::Transferred {
                 downloaded: total_read,
@@ -189,7 +196,6 @@ impl EstablishedConnection {
         match self.stream.write(&self.send_buffer) {
             Ok(sent) => {
                 if sent == self.send_buffer.len() {
-                    // debug!("Wrote all buffer");
                     self.send_buffer.clear();
                 } else {
                     debug!("Wrote partial buffer");
@@ -224,6 +230,7 @@ impl EstablishedConnection {
                 } else {
                     send_buffer.drain(0..sent);
                 }
+                *self.uploaded.borrow_mut() += sent;
             }
             Err(error) => {
                 if error.kind() != std::io::ErrorKind::WouldBlock {
@@ -234,16 +241,26 @@ impl EstablishedConnection {
         Ok(result)
     }
 
+    pub fn send_request(&self, request: Request) {
+        self.disk_requester
+            .send(DiskRequest::Request {
+                info_hash: self.info_hash,
+                token: Token(self.id),
+                request,
+            })
+            .unwrap();
+    }
+
     fn send_block_requests(&mut self) -> UpdateResult {
         if !self.peer_choking {
-            info!("Peer is not choking");
+            debug!("Peer is not choking");
             let sent = self.block_manager.send_block_requests(
                 &mut self.stream,
                 &self.peer_has,
                 self.id,
             )?;
             if sent == 0 {
-                info!("No block requests sent");
+                debug!("No block requests sent");
                 return Ok(UpdateSuccess::NoUpdate);
             }
             return Ok(UpdateSuccess::Success);
@@ -257,88 +274,22 @@ impl EstablishedConnection {
 impl ConnectionBase for EstablishedConnection {
     type UpdateSuccessType = UpdateSuccess;
 
-    fn deregister(&mut self, poll: &mut Poll) {
-        poll.registry().deregister(&mut self.stream).unwrap();
+    fn into_network_source(self) -> NetworkSource {
+        self.stream
     }
 
     fn update(&mut self) -> UpdateResult {
+        let read_result = self.read_all()?;
         match self.state {
-            State::Seeding => {
-                let read_result = self.read_all()?;
-                let mut to_send: Vec<Request> = self.pending_peer_requests.drain(..).collect();
-                let mut to_send_drain = to_send.drain(..);
-                loop {
-                    if let Some(request) = to_send_drain.next() {
-                        debug!("Processing request: {:?}", request);
-                        let data = if let Some(data) = self
-                            .block_manager
-                            .piece_store
-                            .borrow()
-                            .get_block(request.piece_index(), request.offset())
-                        {
-                            debug!("Got {} bytes for request", data.len());
-                            data
-                        } else {
-                            info!("failed to get requested piece: {:?}", request);
-                            continue;
-                        };
-                        let msg = Block {
-                            index: request.piece_index(),
-                            begin: request.offset(),
-                            block: data,
-                        };
-                        if !self.send(&msg)? {
-                            self.pending_peer_requests = to_send_drain.collect();
-                            info!("Got pushback, stopping sends");
-                            break;
-                        }
-                    } else {
-                        break;
-                    }
-                }
-                Ok(read_result)
-            }
+            State::Seeding => Ok(read_result),
             State::ConnectedNormal | State::ConnectedEndgame => {
-                let read_result = self.read_all()?;
                 // Cancel requested Requests (TODO)
-                if !self.pending_peer_requests.is_empty() {
-                    let mut to_send: Vec<Request> = self.pending_peer_requests.drain(..).collect();
-                    let mut to_send_drain = to_send.drain(..);
-                    loop {
-                        if let Some(request) = to_send_drain.next() {
-                            debug!("Processing request: {:?}", request);
-                            let data = if let Some(data) = self
-                                .block_manager
-                                .piece_store
-                                .borrow()
-                                .get_block(request.piece_index(), request.offset())
-                            {
-                                debug!("Got {} bytes for request", data.len());
-                                data
-                            } else {
-                                info!("failed to get requested piece: {:?}", request);
-                                continue;
-                            };
-                            let msg = Block {
-                                index: request.piece_index(),
-                                begin: request.offset(),
-                                block: data,
-                            };
-                            if !self.send(&msg)? {
-                                self.pending_peer_requests = to_send_drain.collect();
-                                info!("Got pushback, stopping sends");
-                                break;
-                            }
-                        } else {
-                            break;
-                        }
-                    }
-                }
-                if self.block_manager.piece_assigner.borrow().is_endgame() {
-                    self.state = State::ConnectedEndgame;
-                    return Ok(read_result);
-                }
-                if self.block_manager.is_done() {
+                // if self.block_manager.piece_assigner.borrow().is_endgame() {
+                //     debug!("Transition to endgame");
+                //     self.state = State::ConnectedEndgame;
+                //     return Ok(read_result);
+                // }
+                if self.block_manager.block_cache.borrow().done() {
                     self.state = State::Seeding;
                     return Ok(read_result);
                 }

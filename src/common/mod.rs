@@ -14,9 +14,9 @@ pub mod create_torrent;
 
 use std::rc::Rc;
 
-use crate::client::FileSystem;
-use crate::client::PieceAssigner;
+use crate::client::{block_cache::BlockCache, piece_assigner::PieceAssigner};
 
 use std::cell::RefCell;
 pub type SharedPieceAssigner = Rc<RefCell<PieceAssigner>>;
-pub type SharedPieceStore = Rc<RefCell<FileSystem>>; // impl Trait syntax pls
+pub type SharedBlockCache = Rc<RefCell<BlockCache>>;
+pub type SharedCount = Rc<RefCell<usize>>;

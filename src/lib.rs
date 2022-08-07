@@ -1,7 +1,7 @@
 pub mod bencoding;
 // pub use bencoding::*;
 
-pub mod client;
+// pub mod old_client;
 // pub use client::*;
 
 pub mod common;
@@ -17,3 +17,5 @@ pub mod tracker;
 // pub use tracker::*;
 
 mod tests;
+
+pub mod client;

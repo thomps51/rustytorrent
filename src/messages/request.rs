@@ -35,7 +35,7 @@ impl Message for Request {
 
     fn update(self, connection: &mut EstablishedConnection) -> UpdateResult {
         log::debug!("Updating connection with request: {:?}", self);
-        connection.pending_peer_requests.push(self);
+        connection.send_request(self);
         Ok(UpdateSuccess::Success)
     }
 
@@ -65,5 +65,9 @@ impl Request {
 
     pub fn offset(&self) -> usize {
         self.begin
+    }
+
+    pub fn length(&self) -> usize {
+        self.length
     }
 }

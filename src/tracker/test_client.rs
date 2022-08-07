@@ -2,8 +2,6 @@ use std::error::Error;
 use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
 
-use crate::common::Torrent;
-
 use super::{EventKind, PeerInfo, TrackerClient, TrackerResponse};
 
 pub struct TestTrackerClient {
@@ -35,8 +33,13 @@ impl TestTrackerClient {
 
 impl TrackerClient for TestTrackerClient {
     fn announce(
-        &self,
-        _torrent: &Torrent,
+        &mut self,
+        _upload: usize,
+        _download: usize,
+        _left: usize,
+        _listen_port: u16,
+        _info_hash_uri: &str,
+        _peer_id: &str,
         _kind: EventKind,
     ) -> Result<TrackerResponse, Box<dyn Error>> {
         Ok(self.response.clone())
