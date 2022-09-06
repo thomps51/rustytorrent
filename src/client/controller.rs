@@ -123,7 +123,7 @@ impl Controller {
     }
 
     pub fn add_torrent(&mut self, torrent: Torrent, completion_handler: Option<CompletionHandler>) {
-        debug!("Adding torrent: {:?}", torrent);
+        // debug!("Adding torrent: {:?}", torrent);
         if let Some(handler) = completion_handler {
             self.completetion_handlers
                 .insert(torrent.metainfo.info_hash_raw, handler);
@@ -254,12 +254,15 @@ impl Controller {
 
 impl Drop for Controller {
     fn drop(&mut self) {
+        // info!("{:?}", std::backtrace::Backtrace::capture());
         self.disk_sender.send(DiskRequest::Stop).unwrap();
         self.poll_sender.send(PollerRequest::Stop).unwrap();
         self.tracker_sender.send(TrackerRequest::Stop).unwrap();
+        let _ = self.send.send(ControllerInputMessage::Stop); // We don't know if it is stopped
         info!("Sending stop messages and joining threads");
         self.disk_thread.take().unwrap().join().unwrap();
         self.poll_thread.take().unwrap().join().unwrap();
         self.tracker_thread.take().unwrap().join().unwrap();
+        info!("Done joining threads");
     }
 }

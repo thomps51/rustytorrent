@@ -6,6 +6,8 @@ use crate::common::Sha1Hash;
 use crate::common::SHA1_HASH_LENGTH;
 use log::{debug, info};
 
+use super::read_byte;
+
 type PeerId = [u8; 20];
 
 #[derive(Debug, Clone, Default)]
@@ -53,12 +55,6 @@ impl Handshake {
         writer.write_all(&self.peer_id)?;
         Ok(())
     }
-}
-
-fn read_byte<T: Read>(reader: &mut T) -> Result<u8, Error> {
-    let mut buffer = [0; 1];
-    reader.read_exact(&mut buffer)?;
-    Ok(buffer[0])
 }
 
 fn verify_pstr<T: Read>(reader: &mut T) -> Result<(), Error> {

@@ -3,8 +3,8 @@ use log::debug;
 use crate::{
     common::{Sha1Hash, PEER_ID_LENGTH},
     tracker::{
-        EventKind, PeerInfoList, TestTrackerClient, TrackerClient, TrackerClientImpl,
-        TrackerResponse,
+        http_tracker::HttpTracker, upd_tracker::UdpTracker, EventKind, PeerInfoList,
+        TestTrackerClient, TrackerClient, TrackerResponse,
     },
 };
 use std::{
@@ -27,7 +27,6 @@ pub enum TrackerRequest {
     },
     Register {
         info_hash: Sha1Hash,
-        info_hash_uri: String,
         peer_id: [u8; PEER_ID_LENGTH],
         listen_port: u16,
         announce_url: String,
@@ -50,7 +49,7 @@ struct TrackerData {
     send: Sender<ControllerInputMessage>,
 }
 
-fn create_tracker(announce: &str) -> Box<dyn TrackerClient> {
+fn create_tracker(announce: String) -> Box<dyn TrackerClient> {
     const TEST_TRACKER: &'static str = "TestTrackerSelf";
     if announce.starts_with(TEST_TRACKER) {
         let port_str = &announce[TEST_TRACKER.len() + 1..];
@@ -59,17 +58,19 @@ fn create_tracker(announce: &str) -> Box<dyn TrackerClient> {
         Box::new(TestTrackerClient::new_local(port as u16))
     } else if announce.starts_with("None") {
         Box::new(TestTrackerClient::new_empty())
+    } else if announce.starts_with("http") {
+        Box::new(HttpTracker { address: announce })
+    } else if announce.starts_with("udp") {
+        Box::new(UdpTracker::new(&announce))
     } else {
-        Box::new(TrackerClientImpl {
-            address: announce.to_string(),
-        })
+        panic!("Not sure what tracker to use for {}", announce);
     }
 }
 
 impl TrackerData {
     pub fn new(announce: String, send: Sender<ControllerInputMessage>) -> Self {
         Self {
-            tracker: create_tracker(&announce),
+            tracker: create_tracker(announce),
             interval: None,
             last_announce: None,
             send,
@@ -83,16 +84,15 @@ impl TrackerData {
         left: usize,
         event: EventKind,
         listen_port: u16,
-        info_hash_uri: &str,
-        peer_id: &str,
         info_hash: Sha1Hash,
+        peer_id: [u8; PEER_ID_LENGTH],
     ) {
         match self.tracker.announce(
             upload,
             download,
             left,
             listen_port,
-            info_hash_uri,
+            info_hash,
             peer_id,
             event,
         ) {
@@ -100,7 +100,7 @@ impl TrackerData {
                 peer_list,
                 interval,
             }) => {
-                debug!("TrackerResponse: {:?}", peer_list);
+                debug!("TrackerResponse: received");
                 self.interval = Some(Duration::from_secs(interval.try_into().unwrap()));
                 self.last_announce = Some(Instant::now());
                 self.send
@@ -110,16 +110,15 @@ impl TrackerData {
                     }))
                     .unwrap()
             }
-            Err(_) => todo!(),
+            Err(error) => panic!("Error while announcing to tracker: {:?}", error),
         }
     }
 }
 
 struct TrackersData {
     listen_port: u16,
-    info_hash_uri: String,
     info_hash: Sha1Hash,
-    peer_id: String,
+    peer_id: [u8; PEER_ID_LENGTH],
     trackers: Vec<TrackerData>,
 }
 
@@ -132,9 +131,8 @@ impl TrackersData {
             left,
             event,
             self.listen_port,
-            &self.info_hash_uri,
-            &self.peer_id,
             self.info_hash,
+            self.peer_id,
         )
     }
 }
@@ -174,7 +172,6 @@ impl TrackerManager {
                 TrackerRequest::Register {
                     info_hash,
                     announce_url,
-                    info_hash_uri,
                     listen_port,
                     peer_id,
                 } => self
@@ -182,10 +179,9 @@ impl TrackerManager {
                     .entry(info_hash)
                     .or_insert(TrackersData {
                         listen_port,
-                        info_hash_uri,
-                        trackers: Vec::new(),
-                        peer_id: unsafe { String::from_utf8_unchecked(peer_id.to_vec()) },
                         info_hash,
+                        trackers: Vec::new(),
+                        peer_id,
                     })
                     .trackers
                     .push(TrackerData::new(announce_url, self.send.clone())),

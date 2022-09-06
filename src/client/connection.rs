@@ -41,7 +41,7 @@ pub enum UpdateSuccess {
 #[derive(Debug)]
 pub enum UpdateError {
     CommunicationError(std::io::Error),
-    UnknownMessage { id: i8 },
+    UnknownMessage { id: u8 },
     IndexOutOfBounds,
     TorrentNotManaged { info_hash: Sha1Hash },
     PeerRemoved,

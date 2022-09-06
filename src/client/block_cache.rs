@@ -143,9 +143,10 @@ impl BlockCache {
                     if value {
                         let begin = BLOCK_LENGTH * block_index;
                         to_cancel.push(Cancel {
-                            index: *piece_index,
-                            begin,
-                            length: BLOCK_LENGTH,
+                            index: *piece_index as u32,
+                            begin: begin as u32,
+                            length: self.piece_info.get_block_length(block_index, *piece_index)
+                                as u32,
                         });
                         sent_blocks.set(block_index, false);
                     }

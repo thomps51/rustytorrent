@@ -90,7 +90,7 @@ impl HandshakingConnection {
         Self {
             token,
             stream,
-            read_buffer: ReadBuffer::new(1 << 20), // 1 MiB
+            read_buffer: ReadBuffer::new(Handshake::SIZE as usize),
             state: HandshakingState::Reading,
             conn_type: Type::Incoming,
             peer_id,
@@ -106,7 +106,7 @@ impl HandshakingConnection {
         Self {
             token,
             stream,
-            read_buffer: ReadBuffer::new(1 << 20), // 1 MiB
+            read_buffer: ReadBuffer::new(Handshake::SIZE as usize),
             state: HandshakingState::Connecting { info_hash },
             conn_type: Type::Outgoing,
             peer_id,

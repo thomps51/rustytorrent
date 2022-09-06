@@ -6,12 +6,12 @@ use std::path::Path;
 
 use log::{debug, info};
 use rustytorrent::client::controller::{Controller, ControllerConfig};
-use slog::Drain;
+// use slog::Drain;
 
 use rustytorrent::common::Torrent;
 
-#[macro_use(slog_o)]
-extern crate slog;
+// #[macro_use(slog_o)]
+// extern crate slog;
 
 fn setup_env() {
     env_logger::builder()

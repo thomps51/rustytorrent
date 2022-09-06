@@ -10,7 +10,10 @@ use super::disk_manager::DiskRequest;
 use super::{ConnectionBase, NetworkSource, UpdateError, UpdateResult, UpdateSuccess};
 use crate::common::{Sha1Hash, SharedBlockCache, SharedCount, SharedPieceAssigner};
 use crate::io::ReadBuffer;
+use crate::messages::protocol_message::HasId;
+use crate::messages::ProtocolMessage;
 use crate::messages::*;
+use write_to::ReadFrom;
 
 pub struct EstablishedConnection {
     pub info_hash: Sha1Hash,
@@ -25,7 +28,7 @@ pub struct EstablishedConnection {
     block_manager: BlockManager,
     pub pending_peer_cancels: Vec<Cancel>,
     next_message_length: Option<usize>,
-    read_buffer: ReadBuffer, // TODO: Each connection doesn't need this, all the connections could share one
+    read_buffer: ReadBuffer, // TODO: Each connection doesn't need this, all the connections could share one.  Any remaining bytes from a unfinished read would need to be copied out though
     send_buffer: Vec<u8>,
     pub num_pieces: usize,
     state: State,
@@ -38,12 +41,6 @@ pub enum State {
     ConnectedNormal,
     ConnectedEndgame,
     Seeding,
-}
-
-fn read_byte_from<T: Read>(stream: &mut T) -> Result<u8, std::io::Error> {
-    let mut buffer = [0; 1];
-    stream.read_exact(&mut buffer)?;
-    Ok(buffer[0])
 }
 
 impl EstablishedConnection {
@@ -92,14 +89,14 @@ impl EstablishedConnection {
             {
                 return Ok(UpdateSuccess::NoUpdate);
             }
-            let value = read_as_be::<u32, _, _>(&mut self.read_buffer).unwrap();
-            value
+            let (value, _) = u32::read_from(&mut self.read_buffer, LENGTH_BYTE_SIZE).unwrap();
+            value as usize
         };
         self.next_message_length = Some(length);
         if length == 0 {
-            let msg = KeepAlive {};
             self.next_message_length = None;
-            return msg.update(self);
+            self.received_keep_alive();
+            return Ok(UpdateSuccess::Success);
         }
         if !self
             .read_buffer
@@ -108,16 +105,17 @@ impl EstablishedConnection {
             return Ok(UpdateSuccess::NoUpdate);
         }
         let total_read = LENGTH_BYTE_SIZE + length;
-        let id = read_byte_from(&mut self.read_buffer)? as i8;
-        macro_rules! dispatch_message ( // This is really neat!
+        let id = read_byte(&mut self.read_buffer)?;
+        let length = length - 1; // subtract ID byte
+        macro_rules! dispatch_message (
             ($($A:ident),*) => (
                 match id {
                     Block::ID => {
-                        Block::read_and_update(&mut self.read_buffer, &mut self.block_manager, length)?;
-                        Ok(UpdateSuccess::Success)
+                        Block::read_and_update(&mut self.read_buffer, &mut self.block_manager, length)
                     },
                     $($A::ID => {
-                        let msg = $A::read_from(&mut self.read_buffer, length)?;
+                        let (msg, length) = $A::read_from(&mut self.read_buffer, length)?;
+                        assert_eq!(length, 0);
                         msg.update(self)
                     })*
                     _ => Err(UpdateError::UnknownMessage{id}),
@@ -187,10 +185,19 @@ impl EstablishedConnection {
     // to send later so we don't send incomplete messages. If we do get pushback, this
     // logic will always drop at least 1 message since we try to push out the remaining
     // buffer at the expense of the next message we are trying to send.
-    pub fn send<T: Message>(&mut self, message: &T) -> Result<bool, std::io::Error> {
+    pub fn send<T: ProtocolMessage>(&mut self, message: &T) -> Result<bool, std::io::Error> {
         let mut result = false;
         if self.send_buffer.len() == 0 {
-            message.write_to(&mut self.send_buffer).unwrap();
+            debug!(
+                "Writing message {} with id {} and length {}, be_length: {:?}, from_be: {}, from_le: {}",
+                T::NAME,
+                T::ID,
+                message.length(),
+                message.length_be_bytes(),
+                u32::from_be_bytes(message.length_be_bytes()),
+                u32::from_le_bytes(message.length_be_bytes()),
+            );
+            message.write(&mut self.send_buffer).unwrap();
             result = true;
         }
         match self.stream.write(&self.send_buffer) {
@@ -212,7 +219,7 @@ impl EstablishedConnection {
         Ok(result)
     }
 
-    pub fn send_to<T: Message, W: Write>(
+    pub fn send_to<T: ProtocolMessage, W: Write>(
         &self,
         message: &T,
         writer: &mut W,
@@ -220,7 +227,7 @@ impl EstablishedConnection {
     ) -> Result<bool, std::io::Error> {
         let mut result = false;
         if send_buffer.len() == 0 {
-            message.write_to(&mut send_buffer).unwrap();
+            message.write(&mut send_buffer).unwrap();
             result = true;
         }
         match writer.write(&self.send_buffer) {

@@ -1,3 +1,4 @@
+use std::io::ErrorKind;
 use std::io::Read;
 use std::io::Result;
 
@@ -78,6 +79,15 @@ impl ReadBuffer {
         let current_unread = self.unread();
         if current_unread >= length {
             return Ok(true);
+        }
+        if length > self.capacity {
+            return Err(std::io::Error::new(
+                ErrorKind::InvalidData,
+                format!(
+                    "Requested length {} is greater than capacity {}",
+                    length, self.capacity
+                ),
+            ));
         }
         let need_to_read = length - current_unread;
         if need_to_read > self.unused() {

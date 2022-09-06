@@ -8,7 +8,8 @@ use bit_vec::BitVec;
 use super::piece_assigner::AssignedBlockResult;
 use crate::common::SharedBlockCache;
 use crate::common::SharedPieceAssigner;
-use crate::messages::*;
+use crate::messages::BlockReader;
+use crate::messages::ProtocolMessage;
 
 // Stats for Vuze
 // Value : Max Speed (MB/s)
@@ -81,11 +82,11 @@ impl BlockManager {
                 }
                 AssignedBlockResult::AssignedBlock { request } => {
                     debug!("Assigned block: {:?}", request);
-                    request.write_to(stream)?;
+                    request.write(stream)?;
                 }
                 AssignedBlockResult::EndgameAssignedBlock { request } => {
                     debug!("Endgame assigned block: {:?}", request);
-                    request.write_to(stream)?;
+                    request.write(stream)?;
                     is_endgame = true;
                     self.endgame_sent_blocks
                         .entry(request.piece_index())
@@ -108,7 +109,7 @@ impl BlockManager {
                 .reconcile(&mut self.endgame_sent_blocks);
             self.blocks_in_flight = blocks_in_flight;
             for cancel in cancels {
-                cancel.write_to(stream)?;
+                cancel.write(stream)?;
             }
         }
         Ok(sent)

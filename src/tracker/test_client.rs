@@ -38,8 +38,8 @@ impl TrackerClient for TestTrackerClient {
         _download: usize,
         _left: usize,
         _listen_port: u16,
-        _info_hash_uri: &str,
-        _peer_id: &str,
+        _info_hash_uri: [u8; 20],
+        _peer_id: [u8; 20],
         _kind: EventKind,
     ) -> Result<TrackerResponse, Box<dyn Error>> {
         Ok(self.response.clone())

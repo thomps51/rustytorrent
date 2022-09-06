@@ -115,6 +115,7 @@ mod tests {
             downloader.run();
         });
         let _ = recv.recv().unwrap();
+        info!("Received signal from downloader");
         d_sender_two.send(ControllerInputMessage::Stop).unwrap();
         s_sender_two.send(ControllerInputMessage::Stop).unwrap();
 

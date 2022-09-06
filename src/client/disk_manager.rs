@@ -313,13 +313,12 @@ impl DiskManager {
         } else {
             return Ok(None);
         };
-        let block_data =
-            torrent_data.get_bytes(request.piece_index(), request.offset(), request.length())?;
-        let block = Block {
-            index: request.piece_index(),
-            begin: request.offset(),
-            block: block_data,
-        };
+        let block_data = torrent_data.get_bytes(
+            request.piece_index(),
+            request.offset(),
+            request.requested_piece_length(),
+        )?;
+        let block = Block::new(request, block_data);
         let result = DiskResponse::RequestCompleted {
             info_hash,
             token,

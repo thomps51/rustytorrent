@@ -2,7 +2,7 @@
 name = "rustytorrent"
 version = "0.1.0"
 authors = ["Tony Thompson <ajthomps51@gmail.com>"]
-edition = "2018"
+edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -24,6 +24,7 @@ rand = "0.7"
 tempfile = "3.3.0"
 chrono = "0.4.19"
 env_logger = "0.9.0"
+write_to = { path = "../write_to" }
 
 [profile.release]
 opt-level = 3

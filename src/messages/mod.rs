@@ -1,132 +1,247 @@
-pub mod message;
-pub use message::*;
-
+pub mod block_reader;
+pub use block_reader::*;
 pub mod handshake;
 pub use handshake::*;
+pub mod protocol_message;
+pub use protocol_message::*;
+pub mod udp_tracker;
 
-pub mod keep_alive;
-pub use keep_alive::*;
-
-pub mod have;
-pub use have::*;
-
-pub mod bitfield;
-pub use bitfield::*;
-
-pub mod request;
-pub use request::*;
-
-pub mod block;
-pub use block::*;
-
-pub mod cancel;
-pub use cancel::*;
-
-use crate::client::{EstablishedConnection, UpdateResult, UpdateSuccess};
-use std::io::Error;
 use std::io::Read;
-use std::io::Write;
 
-use log::info;
+use crate::messages::protocol_message::HasId;
 
-macro_rules! ImplSingleByteMessage {
-    ($NAME:ident, $ID:literal, $Flag:ident, $Value:literal) => {
-        #[derive(Debug, Clone)]
-        pub struct $NAME {}
+use bit_vec::BitVec;
+use write_to::{Length, NormalizedIntegerAccessors, ReadFrom, WriteTo};
 
-        impl Message for $NAME {
-            const ID: i8 = $ID;
-            const SIZE: MessageLength = MessageLength::Fixed(1); // id
-            const NAME: &'static str = stringify!($NAME);
+use crate::{
+    client::{
+        piece_info::PieceInfo, BlockManager, EstablishedConnection, UpdateError, UpdateResult,
+        UpdateSuccess,
+    },
+    common::BLOCK_LENGTH,
+};
 
-            fn update(self, connection: &mut EstablishedConnection) -> UpdateResult {
-                connection.$Flag = $Value;
-                info!(
-                    "Connection {} received message {}",
-                    connection.id,
-                    Self::NAME,
-                );
-                Ok(UpdateSuccess::Success)
-            }
+pub fn read_byte<T: Read>(reader: &mut T) -> std::io::Result<u8> {
+    let mut buffer = [0; 1];
+    reader.read_exact(&mut buffer)?;
+    Ok(buffer[0])
+}
 
-            fn read_data<T: Read>(_: &mut T, _: usize) -> Result<Self, Error> {
-                Ok($NAME {})
+// macro_rules! derive_message {
+//     ($ID: literal, $NAME:ident) => {
+//         #[derive(Debug, WriteTo, ReadFrom, Length, NormalizedIntegerAccessors, Clone)]
+//         pub struct $NAME {}
+
+//         impl HasId for $NAME {
+//             const ID: u8 = $ID;
+//         }
+//     };
+//     ($ID: literal, $NAME:ident, $($element: ident: $ty: ty),*) => {
+//         #[derive(Debug, WriteTo, ReadFrom, Length, NormalizedIntegerAccessors, Clone)]
+//         pub struct $NAME {
+//             $(pub $element: $ty),*
+//         }
+
+//         impl HasId for $NAME {
+//             const ID: u8 = $ID;
+//         }
+//     };
+// }
+
+// Note, trying to condense these with macro_rules leads to NormalizedIntegetAccessors
+// not working properly because of macro hygiene (doesn't implement a trait)
+#[derive(Debug, ReadFrom, WriteTo, Length, Clone, NormalizedIntegerAccessors)]
+pub struct Choke {}
+
+#[derive(Debug, ReadFrom, WriteTo, Length, Clone, NormalizedIntegerAccessors)]
+pub struct Unchoke {}
+
+#[derive(Debug, ReadFrom, WriteTo, Length, Clone, NormalizedIntegerAccessors)]
+pub struct Interested {}
+
+#[derive(Debug, ReadFrom, WriteTo, Length, Clone, NormalizedIntegerAccessors)]
+pub struct NotInterested {}
+
+#[derive(Debug, ReadFrom, WriteTo, Length, Clone, NormalizedIntegerAccessors)]
+pub struct Bitfield {
+    pub bitfield: BitVec,
+}
+
+#[derive(Debug, ReadFrom, WriteTo, Length, Clone, NormalizedIntegerAccessors)]
+pub struct Have {
+    pub index: u32,
+}
+
+#[derive(Debug, ReadFrom, WriteTo, Clone, NormalizedIntegerAccessors)]
+pub struct Request {
+    pub index: u32,
+    pub begin: u32,
+    pub length: u32,
+}
+
+#[derive(Debug, ReadFrom, WriteTo, Length, Clone, NormalizedIntegerAccessors)]
+pub struct Block {
+    pub index: u32,
+    pub begin: u32,
+    pub block: Vec<u8>,
+}
+
+#[derive(Debug, ReadFrom, WriteTo, Length, Clone, NormalizedIntegerAccessors)]
+pub struct Cancel {
+    pub index: u32,
+    pub begin: u32,
+    pub length: u32,
+}
+
+#[derive(Debug, ReadFrom, WriteTo, Length, Clone, NormalizedIntegerAccessors)]
+pub struct Port {
+    pub listen_port: u16,
+}
+
+macro_rules! impl_has_id {
+    ($ID: literal, $NAME:ident) => {
+        impl HasId for $NAME {
+            const ID: u8 = $ID;
+        }
+    };
+}
+
+impl_has_id!(0, Choke);
+impl_has_id!(1, Unchoke);
+impl_has_id!(2, Interested);
+impl_has_id!(3, NotInterested);
+impl_has_id!(4, Have);
+impl_has_id!(5, Bitfield);
+impl_has_id!(6, Request);
+impl_has_id!(7, Block);
+impl_has_id!(8, Cancel);
+impl_has_id!(9, Port);
+
+macro_rules! impl_length_fixed_size {
+    ($NAME:ident) => {
+        impl Length for $NAME {
+            fn length(&self) -> usize {
+                std::mem::size_of::<$NAME>()
             }
         }
     };
 }
-ImplSingleByteMessage!(Choke, 0, peer_choking, true);
-ImplSingleByteMessage!(Unchoke, 1, peer_choking, false);
-ImplSingleByteMessage!(Interested, 2, peer_interested, true);
-ImplSingleByteMessage!(NotInterested, 3, peer_interested, false);
 
-#[derive(Debug, Clone)]
-pub struct Port {
-    listen_port: u16,
+impl_length_fixed_size!(Request);
+
+macro_rules! ImplSingleByteMessage {
+    ($NAME:ident, $Flag:ident, $Value:literal) => {
+        impl ProtocolMessage for $NAME {
+            fn update(self, connection: &mut EstablishedConnection) -> UpdateResult {
+                connection.$Flag = $Value;
+                Ok(UpdateSuccess::Success)
+            }
+        }
+    };
+}
+ImplSingleByteMessage!(Choke, peer_choking, true);
+ImplSingleByteMessage!(Unchoke, peer_choking, false);
+ImplSingleByteMessage!(Interested, peer_interested, true);
+ImplSingleByteMessage!(NotInterested, peer_interested, false);
+
+impl ProtocolMessage for Have {
+    fn update(self, connection: &mut EstablishedConnection) -> UpdateResult {
+        if self.index as usize >= connection.peer_has.len() {
+            return Err(UpdateError::IndexOutOfBounds);
+        }
+        connection.peer_has.set(self.index as usize, true);
+        Ok(UpdateSuccess::Success)
+    }
 }
 
-impl Message for Port {
-    const ID: i8 = 9;
-    const SIZE: MessageLength = MessageLength::Fixed(3);
-    const NAME: &'static str = "Port";
+impl ProtocolMessage for Bitfield {
+    fn update(self, connection: &mut EstablishedConnection) -> UpdateResult {
+        // Received bitfield was padded with extra bits, so we need to truncate it
+        connection.peer_has = self.bitfield;
+        connection.peer_has.truncate(connection.num_pieces);
+        Ok(UpdateSuccess::Success)
+    }
+}
 
-    fn read_data<T: Read>(reader: &mut T, _: usize) -> Result<Self, Error> {
-        let listen_port = read_as_be::<u16, _, _>(reader)?;
-        Ok(Port { listen_port })
+impl ProtocolMessage for Request {
+    fn update(self, connection: &mut EstablishedConnection) -> UpdateResult {
+        log::debug!("Updating connection with request: {:?}", self);
+        connection.send_request(self);
+        Ok(UpdateSuccess::Success)
+    }
+}
+
+impl Request {
+    pub fn new(block_index: usize, piece_index: usize, piece_info: PieceInfo) -> Self {
+        Request {
+            index: piece_index as _,
+            begin: block_index as u32 * BLOCK_LENGTH as u32,
+            length: piece_info.get_block_length(block_index as _, piece_index as _) as _,
+        }
     }
 
+    pub fn block_index(&self) -> usize {
+        self.begin as usize / BLOCK_LENGTH
+    }
+    pub fn piece_index(&self) -> usize {
+        self.index as _
+    }
+
+    pub fn offset(&self) -> usize {
+        self.get_begin()
+    }
+
+    pub fn requested_piece_length(&self) -> usize {
+        self.get_length()
+    }
+}
+
+impl ProtocolMessage for Block {
+    fn update(self, _: &mut EstablishedConnection) -> UpdateResult {
+        panic!("read_and_update used instead");
+    }
+}
+
+impl Block {
+    pub fn new(request: &Request, block: Vec<u8>) -> Self {
+        assert_eq!(request.requested_piece_length(), block.len());
+        Block {
+            index: request.index,
+            begin: request.begin,
+            block,
+        }
+    }
+
+    pub fn read_and_update<T: Read>(
+        reader: &mut T,
+        block_manager: &mut BlockManager,
+        length: usize,
+    ) -> UpdateResult {
+        // Combining read and update allows us to send the data straight where it needs to go instead
+        // of copying it into the buffer and then copying it to the store.
+        let (index, length) = u32::read_from(reader, length)?;
+        let (begin, length) = u32::read_from(reader, length)?;
+        log::debug!(
+            "Reading and updating from Block message, index: {}, begin: {}, size: {}",
+            index,
+            begin,
+            length,
+        );
+        block_manager.add_block(BlockReader::new(reader, begin as _, index as _, length))?;
+        Ok(UpdateSuccess::Success)
+    }
+}
+
+impl ProtocolMessage for Cancel {
+    fn update(self, connection: &mut EstablishedConnection) -> UpdateResult {
+        connection.pending_peer_cancels.push(self);
+        Ok(UpdateSuccess::Success)
+    }
+}
+
+impl ProtocolMessage for Port {
     fn update(self, _connection: &mut EstablishedConnection) -> UpdateResult {
         // Simple ack, DHT not implemented
         Ok(UpdateSuccess::Success)
     }
-
-    fn write_data<T: Write>(&self, writer: &mut T) -> Result<(), Error> {
-        writer.write_all(&self.listen_port.to_be_bytes())?;
-        Ok(())
-    }
-}
-
-pub trait Primative: Sized + std::marker::Copy {
-    fn from_be_bytes(array: &[u8]) -> Self;
-}
-
-use std::convert::TryInto;
-macro_rules! ImplPrimative {
-    ($NAME:ident) => {
-        impl Primative for $NAME {
-            fn from_be_bytes(array: &[u8]) -> Self {
-                $NAME::from_be_bytes(array.try_into().unwrap())
-            }
-        }
-    };
-}
-
-ImplPrimative!(u8);
-ImplPrimative!(u16);
-ImplPrimative!(u32);
-ImplPrimative!(u128);
-use num_traits::AsPrimitive;
-use num_traits::PrimInt;
-pub fn read_as_be<T: Primative + AsPrimitive<V>, U: Read, V: PrimInt + 'static>(
-    reader: &mut U,
-) -> Result<V, Error> {
-    // I don't understand why 'static is necessary.  Shouldn't PrimInt make it not a reference?
-    // Some how an immutable reference meets all that criteria.
-    //
-    // Ideally we would use an exact size array here, but until rust gets better const generic
-    // support and we are able to do [u8; std::mem::size_of::<T>()] here, it's easier to resort to
-    // using a max size.
-    let mut buffer = [0; 128 / 8];
-    let length = std::mem::size_of::<T>();
-    if length > buffer.len() {
-        panic!("Length too large! Only supports up to 128 bit types");
-    }
-    let slice = &mut buffer[0..length];
-    reader.read_exact(slice)?;
-    let result: V = T::from_be_bytes(slice).as_();
-    Ok(result)
-}
-
-pub fn to_u32_be(value: usize) -> [u8; 4] {
-    (value as u32).to_be_bytes()
 }

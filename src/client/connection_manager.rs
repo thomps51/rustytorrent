@@ -7,7 +7,7 @@ use std::rc::Rc;
 use std::sync::mpsc::Sender;
 
 use bit_vec::BitVec;
-use log::{debug, info};
+use log::{debug, info, warn};
 use mio::net::{TcpListener, TcpStream};
 use mio::{Interest, Token};
 use std::net::SocketAddr;
@@ -26,7 +26,7 @@ use crate::client::connection::ConnectionBase;
 use crate::common::PEER_ID_PREFIX;
 use crate::common::{MetaInfo, SharedBlockCache, SharedCount, PEER_ID_LENGTH};
 use crate::common::{Sha1Hash, SharedPieceAssigner};
-use crate::messages::{Bitfield, Block, Have, Interested, Unchoke};
+use crate::messages::{Bitfield, Block, Handshake, Have, Interested, Unchoke};
 use crate::tracker::{EventKind, PeerInfo, PeerInfoList};
 
 const PRINT_UPDATE_TIME: std::time::Duration = std::time::Duration::from_secs(1);
@@ -184,16 +184,17 @@ impl ConnectionManager {
     }
 
     pub fn reregister_connected(&mut self, token: Token) {
-        let (info_hash, source, peer_info) = self.connecting.remove(&token).unwrap();
-        self.poll_sender
-            .send(PollerRequest::Reregister {
-                info_hash: Some(info_hash),
-                source,
-                token,
-                interests: Interest::READABLE,
-                peer_info,
-            })
-            .unwrap();
+        if let Some((info_hash, source, peer_info)) = self.connecting.remove(&token) {
+            self.poll_sender
+                .send(PollerRequest::Reregister {
+                    info_hash: Some(info_hash),
+                    source,
+                    token,
+                    interests: Interest::READABLE,
+                    peer_info,
+                })
+                .unwrap();
+        }
     }
 
     pub fn start_outgoing_connection(
@@ -247,7 +248,6 @@ impl ConnectionManager {
             .send(TrackerRequest::Register {
                 info_hash,
                 announce_url: meta_info.announce,
-                info_hash_uri: meta_info.info_hash_uri,
                 peer_id: self.peer_id,
                 listen_port: self.config.listen_port,
             })
@@ -313,12 +313,10 @@ impl ConnectionManager {
         } else {
             return Ok(());
         };
-        let handshake = match peer {
+        match peer {
             Connection::Handshaking(connection) => match connection.update()? {
-                HandshakeUpdateSuccess::NoUpdate => {
-                    return Ok(());
-                }
-                HandshakeUpdateSuccess::Complete(handshake) => handshake,
+                HandshakeUpdateSuccess::NoUpdate => {}
+                HandshakeUpdateSuccess::Complete(handshake) => self.promote(token, handshake)?,
             },
             Connection::Established(connection) => match connection.update()? {
                 UpdateSuccess::Transferred {
@@ -327,13 +325,14 @@ impl ConnectionManager {
                 } => {
                     self.downloaded += downloaded;
                     self.uploaded += uploaded;
-                    return Ok(());
                 }
-                UpdateSuccess::NoUpdate | UpdateSuccess::Success => {
-                    return Ok(());
-                }
+                UpdateSuccess::NoUpdate | UpdateSuccess::Success => {}
             },
         };
+        Ok(())
+    }
+
+    fn promote(&mut self, token: Token, handshake: Handshake) -> Result<(), UpdateError> {
         debug!("Handshake received, promoting to established connection");
         let torrent_data = if let Some(torrent_data) = self.torrents.get_mut(&handshake.info_hash) {
             torrent_data
@@ -400,7 +399,15 @@ impl ConnectionManager {
     }
 
     pub fn add_peers(&mut self, info_hash: Sha1Hash, peer_list: PeerInfoList) {
-        let torrent = self.torrents.get_mut(&info_hash).unwrap();
+        let torrent = if let Some(torrent) = self.torrents.get_mut(&info_hash) {
+            torrent
+        } else {
+            warn!(
+                "Requested add_peers for torrent that is not managed: {:?}",
+                info_hash
+            );
+            return;
+        };
         torrent.peers_data.add_peers_from_tracker(peer_list);
         let free = self.config.max_peers - self.connections.len();
         if free <= 0 || !torrent.peers_data.have_unconnected() {
@@ -472,10 +479,6 @@ impl ConnectionManager {
                 for (k, v) in self.connections.iter() {
                     temp.push((k, v));
                 }
-                // temp.sort_by(|a, b| b.1.downloaded.cmp(&a.1.downloaded));
-                // for (id, conn) in temp.iter().take(5) {
-                //     print!("Connection {}: {} bytes\n", id.0, conn.downloaded);
-                // }
                 use std::io::prelude::*;
                 std::io::stdout()
                     .flush()
@@ -499,7 +502,9 @@ impl ConnectionManager {
                         if peer.peer_has[piece_index] {
                             continue;
                         }
-                        if let Err(error) = peer.send(&Have { index: piece_index }) {
+                        if let Err(error) = peer.send(&Have {
+                            index: piece_index as u32,
+                        }) {
                             info!("Disconnecting peer {}: {} while sending", token.0, error);
                             to_remove.push((*token, error));
                         }
