@@ -43,7 +43,10 @@ impl ConnectionBase for HandshakingConnection {
         self.stream
     }
 
-    fn update(&mut self) -> Result<Self::UpdateSuccessType, UpdateError> {
+    fn update(
+        &mut self,
+        _read_buffer: &mut ReadBuffer, // Use our own buffer with the exact handshake size
+    ) -> Result<Self::UpdateSuccessType, UpdateError> {
         match self.state {
             HandshakingState::Connecting { info_hash } => {
                 debug!("Connections for connection {}", self.token.0);
@@ -85,8 +88,7 @@ impl HandshakingConnection {
         token: Token,
         peer_id: [u8; PEER_ID_LENGTH],
     ) -> Self {
-        // let addr = stream.peer_addr().unwrap();
-        // info!("New incoming connection from {}", addr);
+        debug!("New incoming connection from {:?}", stream.peer_addr());
         Self {
             token,
             stream,

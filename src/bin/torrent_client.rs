@@ -3,9 +3,11 @@
 use std::error::Error;
 use std::io::Write;
 use std::path::Path;
+use std::sync::mpsc::channel;
+use std::thread;
 
 use log::{debug, info};
-use rustytorrent::client::controller::{Controller, ControllerConfig};
+use rustytorrent::client::controller::{Controller, ControllerConfig, ControllerInputMessage};
 // use slog::Drain;
 
 use rustytorrent::common::Torrent;
@@ -54,15 +56,28 @@ fn main() -> Result<(), Box<dyn Error>> {
     debug!("test debug");
     let torrent = Torrent::from_file(Path::new(&args[1]), Path::new(""))?;
     debug!("Torrent created");
-    let mut controller = Controller::new(ControllerConfig {
-        listen_port: 6800,
-        max_peers: 50,
-        seed: false,
-        print_output: true,
+    let (sender, recv) = channel();
+    let (d_sender, d_recv) = channel();
+    let d_sender_two = d_sender.clone();
+    let d_thread = thread::spawn(move || {
+        let mut downloader = Controller::new_from_channel(
+            ControllerConfig {
+                listen_port: 6800,
+                max_peers: 100,
+                seed: false,
+                print_output: false,
+            },
+            d_sender,
+            d_recv,
+        );
+        downloader.add_torrent(torrent, Some(sender));
+        info!("Downloader started");
+        downloader.run();
     });
     debug!("Created contoller");
-    controller.add_torrent(torrent, None);
-    controller.run();
     info!("done!");
+    let _ = recv.recv().unwrap();
+    d_sender_two.send(ControllerInputMessage::Stop).unwrap();
+    d_thread.join().unwrap();
     Ok(())
 }

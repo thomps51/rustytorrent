@@ -2,6 +2,7 @@ use super::EstablishedConnection;
 use super::HandshakingConnection;
 use super::NetworkSource;
 use crate::common::Sha1Hash;
+use crate::io::ReadBuffer;
 
 pub enum Connection {
     Handshaking(HandshakingConnection),
@@ -20,7 +21,10 @@ impl Connection {
 pub trait ConnectionBase: Sized {
     type UpdateSuccessType: Default;
 
-    fn update(&mut self) -> Result<Self::UpdateSuccessType, UpdateError>;
+    fn update(
+        &mut self,
+        read_buffer: &mut ReadBuffer,
+    ) -> Result<Self::UpdateSuccessType, UpdateError>;
 
     fn into_network_source(self) -> NetworkSource;
 }

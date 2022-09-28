@@ -26,6 +26,7 @@ use crate::client::connection::ConnectionBase;
 use crate::common::PEER_ID_PREFIX;
 use crate::common::{MetaInfo, SharedBlockCache, SharedCount, PEER_ID_LENGTH};
 use crate::common::{Sha1Hash, SharedPieceAssigner};
+use crate::io::ReadBuffer;
 use crate::messages::{Bitfield, Block, Handshake, Have, Interested, Unchoke};
 use crate::tracker::{EventKind, PeerInfo, PeerInfoList};
 
@@ -45,6 +46,7 @@ pub struct ConnectionManager {
     connecting: HashMap<Token, (Sha1Hash, NetworkSource, PeerInfo)>,
     tracker_sender: Sender<TrackerRequest>,
     token_to_info_hash: HashMap<Token, Sha1Hash>,
+    read_buffer: ReadBuffer,
 }
 
 pub struct ConnectionManagerConfig {
@@ -166,6 +168,7 @@ impl ConnectionManager {
             connecting: HashMap::new(),
             tracker_sender,
             token_to_info_hash: HashMap::new(),
+            read_buffer: ReadBuffer::new(1 << 20), // 1 MiB
         }
     }
 
@@ -314,20 +317,26 @@ impl ConnectionManager {
             return Ok(());
         };
         match peer {
-            Connection::Handshaking(connection) => match connection.update()? {
-                HandshakeUpdateSuccess::NoUpdate => {}
-                HandshakeUpdateSuccess::Complete(handshake) => self.promote(token, handshake)?,
-            },
-            Connection::Established(connection) => match connection.update()? {
-                UpdateSuccess::Transferred {
-                    downloaded,
-                    uploaded,
-                } => {
-                    self.downloaded += downloaded;
-                    self.uploaded += uploaded;
+            Connection::Handshaking(connection) => {
+                match connection.update(&mut self.read_buffer)? {
+                    HandshakeUpdateSuccess::NoUpdate => {}
+                    HandshakeUpdateSuccess::Complete(handshake) => {
+                        self.promote(token, handshake)?
+                    }
                 }
-                UpdateSuccess::NoUpdate | UpdateSuccess::Success => {}
-            },
+            }
+            Connection::Established(connection) => {
+                match connection.update(&mut self.read_buffer)? {
+                    UpdateSuccess::Transferred {
+                        downloaded,
+                        uploaded,
+                    } => {
+                        self.downloaded += downloaded;
+                        self.uploaded += uploaded;
+                    }
+                    UpdateSuccess::NoUpdate | UpdateSuccess::Success => {}
+                }
+            }
         };
         Ok(())
     }
@@ -409,6 +418,19 @@ impl ConnectionManager {
             return;
         };
         torrent.peers_data.add_peers_from_tracker(peer_list);
+        self.connect_peers(info_hash);
+    }
+
+    pub fn connect_peers(&mut self, info_hash: Sha1Hash) {
+        let torrent = if let Some(torrent) = self.torrents.get_mut(&info_hash) {
+            torrent
+        } else {
+            warn!(
+                "Requested connect_peers for torrent that is not managed: {:?}",
+                info_hash
+            );
+            return;
+        };
         let free = self.config.max_peers - self.connections.len();
         if free <= 0 || !torrent.peers_data.have_unconnected() {
             return;

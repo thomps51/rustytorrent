@@ -2,7 +2,8 @@ use std::io::ErrorKind;
 use std::io::Read;
 use std::io::Result;
 
-//
+// This is pretty much std::io::ReadBuf except with the ability to "shift" the
+// Unread data to the beginning of the buffer.
 //
 //   Read         Unread    Unused
 //   XXXXXXXXXXXXYYYYYYYYYY-----------
@@ -11,7 +12,7 @@ use std::io::Result;
 //
 //   XXXXXXXXXXXXXXXXXYYYYY-----------
 //
-//   shift()
+//   shift_left()
 //
 //   YYYYY----------------------------
 pub struct ReadBuffer {
@@ -60,6 +61,40 @@ impl ReadBuffer {
         &self.buffer[self.unread_start..self.unused_start]
     }
 
+    // pub fn prepend_unread(&mut self, data: &[u8]) {
+    //     // TODO check math
+    //     if self.unread_start <= data.len() {
+    //         // Need to make room.  Ideally this doesn't happen often, because it can be expensive.
+    //         let room_in_front = self.unread_start - 1; // TODO check math
+    //         let room_in_back = self.capacity - self.unused_start; // TODO check math
+
+    //         if room_in_front + room_in_back < data.len() {
+    //             let extra_space_needed = data.len() - room_in_front - room_in_back; // TODO check math
+    //             let mut new_buffer = Vec::with_capacity(self.capacity + extra_space_needed);
+    //             new_buffer.resize(self.capacity + extra_space_needed, 0);
+    //             let size = self.unread();
+    //             unsafe {
+    //                 let dst_ptr = new_buffer.as_mut_ptr().offset(data.len() as isize);
+    //                 let src_ptr = data.as_ptr().offset(self.unread_start as isize);
+    //                 std::ptr::copy_nonoverlapping(src_ptr, dst_ptr, size);
+    //             }
+
+    //             self.buffer = new_buffer;
+    //         } else {
+    //             let shift_amount = data.len() - room_in_front;
+    //             self.shift(shift_amount as isize);
+    //         }
+    //     }
+
+    //     let start = self.unread_start - data.len(); // TODO verify this math
+    //     unsafe {
+    //         let dst_ptr = self.buffer.as_mut_ptr().offset(start as isize);
+    //         let src_ptr = data.as_ptr();
+    //         std::ptr::copy_nonoverlapping(src_ptr, dst_ptr, data.len());
+    //     }
+    //     self.unread_start = start;
+    // }
+
     pub fn read_from<T: std::io::Read>(&mut self, reader: &mut T) -> Result<usize> {
         let read = reader.read(&mut self.buffer[self.unused_start..])?;
         self.unused_start += read;
@@ -91,7 +126,7 @@ impl ReadBuffer {
         }
         let need_to_read = length - current_unread;
         if need_to_read > self.unused() {
-            self.shift();
+            self.shift_left();
         }
         let read = match self.read_from(reader) {
             Ok(l) => l,
@@ -105,15 +140,22 @@ impl ReadBuffer {
         Ok(read >= need_to_read)
     }
 
-    pub fn shift(&mut self) {
+    fn shift_left(&mut self) {
+        self.shift(self.unread_start as isize * -1);
+    }
+
+    // Maybe more accurately shift_unread
+    fn shift(&mut self, amount: isize) {
         let size = self.unread();
+        let new_unread_start = self.unread_start as isize + amount;
+        debug_assert!(new_unread_start >= 0 && new_unread_start < self.capacity as isize);
         unsafe {
             let src = self.buffer.as_ptr().offset(self.unread_start as isize);
-            let dst = self.buffer.as_mut_ptr();
+            let dst = self.buffer.as_mut_ptr().offset(new_unread_start);
             std::ptr::copy(src, dst, size);
         }
-        self.unread_start = 0;
-        self.unused_start = size;
+        self.unread_start = new_unread_start as usize;
+        self.unused_start = self.unread_start + size;
     }
 
     pub fn unread(&self) -> usize {

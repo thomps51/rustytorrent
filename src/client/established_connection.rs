@@ -28,7 +28,7 @@ pub struct EstablishedConnection {
     block_manager: BlockManager,
     pub pending_peer_cancels: Vec<Cancel>,
     next_message_length: Option<usize>,
-    read_buffer: ReadBuffer, // TODO: Each connection doesn't need this, all the connections could share one.  Any remaining bytes from a unfinished read would need to be copied out though
+    incomplete_message_buffer: Vec<u8>,
     send_buffer: Vec<u8>,
     pub num_pieces: usize,
     state: State,
@@ -68,7 +68,7 @@ impl EstablishedConnection {
             block_manager: BlockManager::new(piece_assigner, block_cache),
             pending_peer_cancels: Vec::new(),
             next_message_length: None,
-            read_buffer: ReadBuffer::new(1 << 20), // 1 MiB
+            incomplete_message_buffer: Vec::new(),
             send_buffer: Vec::new(),
             num_pieces,
             state: State::ConnectedNormal,
@@ -78,18 +78,21 @@ impl EstablishedConnection {
         }
     }
 
-    fn read(&mut self) -> UpdateResult {
+    fn read(&mut self, read_buffer: &mut ReadBuffer) -> UpdateResult {
         const LENGTH_BYTE_SIZE: usize = 4;
+        if !self.incomplete_message_buffer.is_empty() {
+            read_buffer
+                .read_from(&mut self.incomplete_message_buffer.as_slice())
+                .unwrap();
+            self.incomplete_message_buffer.clear();
+        }
         let length = if let Some(v) = self.next_message_length {
             v
         } else {
-            if !self
-                .read_buffer
-                .read_at_least_from(LENGTH_BYTE_SIZE, &mut self.stream)?
-            {
+            if !read_buffer.read_at_least_from(LENGTH_BYTE_SIZE, &mut self.stream)? {
                 return Ok(UpdateSuccess::NoUpdate);
             }
-            let (value, _) = u32::read_from(&mut self.read_buffer, LENGTH_BYTE_SIZE).unwrap();
+            let (value, _) = u32::read_from(read_buffer, LENGTH_BYTE_SIZE).unwrap();
             value as usize
         };
         self.next_message_length = Some(length);
@@ -98,23 +101,20 @@ impl EstablishedConnection {
             self.received_keep_alive();
             return Ok(UpdateSuccess::Success);
         }
-        if !self
-            .read_buffer
-            .read_at_least_from(length, &mut self.stream)?
-        {
+        if !read_buffer.read_at_least_from(length, &mut self.stream)? {
             return Ok(UpdateSuccess::NoUpdate);
         }
         let total_read = LENGTH_BYTE_SIZE + length;
-        let id = read_byte(&mut self.read_buffer)?;
+        let id = read_byte(read_buffer)?;
         let length = length - 1; // subtract ID byte
         macro_rules! dispatch_message (
             ($($A:ident),*) => (
                 match id {
                     Block::ID => {
-                        Block::read_and_update(&mut self.read_buffer, &mut self.block_manager, length)
+                        Block::read_and_update(read_buffer, &mut self.block_manager, length)
                     },
                     $($A::ID => {
-                        let (msg, length) = $A::read_from(&mut self.read_buffer, length)?;
+                        let (msg, length) = $A::read_from(read_buffer, length)?;
                         assert_eq!(length, 0);
                         msg.update(self)
                     })*
@@ -145,13 +145,17 @@ impl EstablishedConnection {
     }
 
     // Read until EWOULDBLOCK or error occurs
-    fn read_all(&mut self) -> UpdateResult {
+    fn read_all(&mut self, read_buffer: &mut ReadBuffer) -> UpdateResult {
         let mut total_downloaded = 0;
         let mut total_uploaded = 0;
         loop {
-            let retval = self.read()?;
+            let retval = self.read(read_buffer)?;
             match retval {
                 UpdateSuccess::NoUpdate => {
+                    self.incomplete_message_buffer
+                        .write_all(read_buffer.get_unread())
+                        .unwrap();
+                    read_buffer.clear();
                     break;
                 }
                 UpdateSuccess::Transferred {
@@ -219,36 +223,7 @@ impl EstablishedConnection {
         Ok(result)
     }
 
-    pub fn send_to<T: ProtocolMessage, W: Write>(
-        &self,
-        message: &T,
-        writer: &mut W,
-        mut send_buffer: &mut Vec<u8>,
-    ) -> Result<bool, std::io::Error> {
-        let mut result = false;
-        if send_buffer.len() == 0 {
-            message.write(&mut send_buffer).unwrap();
-            result = true;
-        }
-        match writer.write(&self.send_buffer) {
-            Ok(sent) => {
-                if sent == self.send_buffer.len() {
-                    send_buffer.clear();
-                } else {
-                    send_buffer.drain(0..sent);
-                }
-                *self.uploaded.borrow_mut() += sent;
-            }
-            Err(error) => {
-                if error.kind() != std::io::ErrorKind::WouldBlock {
-                    return Err(error);
-                }
-            }
-        }
-        Ok(result)
-    }
-
-    pub fn send_request(&self, request: Request) {
+    pub fn send_disk_request(&self, request: Request) {
         self.disk_requester
             .send(DiskRequest::Request {
                 info_hash: self.info_hash,
@@ -285,8 +260,15 @@ impl ConnectionBase for EstablishedConnection {
         self.stream
     }
 
-    fn update(&mut self) -> UpdateResult {
-        let read_result = self.read_all()?;
+    fn update(&mut self, read_buffer: &mut ReadBuffer) -> UpdateResult {
+        let read_result = match self.read_all(read_buffer) {
+            Ok(read_result) => read_result,
+            Err(error) => {
+                read_buffer.clear();
+                return Err(error);
+            }
+        };
+
         match self.state {
             State::Seeding => Ok(read_result),
             State::ConnectedNormal | State::ConnectedEndgame => {

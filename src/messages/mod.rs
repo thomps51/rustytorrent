@@ -166,7 +166,7 @@ impl ProtocolMessage for Bitfield {
 impl ProtocolMessage for Request {
     fn update(self, connection: &mut EstablishedConnection) -> UpdateResult {
         log::debug!("Updating connection with request: {:?}", self);
-        connection.send_request(self);
+        connection.send_disk_request(self);
         Ok(UpdateSuccess::Success)
     }
 }
