@@ -1,7 +1,8 @@
 use log::debug;
+use mio::net::UdpSocket;
 
 use crate::{
-    common::{Sha1Hash, PEER_ID_LENGTH},
+    common::{new_udp_socket, Sha1Hash, PEER_ID_LENGTH},
     tracker::{
         http_tracker::HttpTracker, upd_tracker::UdpTracker, EventKind, PeerInfoList,
         TestTrackerClient, TrackerClient, TrackerResponse,
@@ -10,11 +11,11 @@ use crate::{
 use std::{
     collections::HashMap,
     convert::TryInto,
+    net::SocketAddr,
+    rc::Rc,
     sync::mpsc::{Receiver, Sender},
     time::{Duration, Instant},
 };
-
-use super::controller::ControllerInputMessage;
 
 #[derive(Debug)]
 pub enum TrackerRequest {
@@ -35,7 +36,7 @@ pub enum TrackerRequest {
 }
 
 #[derive(Debug)]
-pub enum TrackerReponse {
+pub enum TrackerThreadResponse {
     Announce {
         info_hash: Sha1Hash,
         peer_list: PeerInfoList,
@@ -46,7 +47,8 @@ struct TrackerData {
     interval: Option<Duration>,
     last_announce: Option<Instant>,
     tracker: Box<dyn TrackerClient>,
-    send: Sender<ControllerInputMessage>,
+    send_socket: Rc<UdpSocket>,
+    send_chan: Sender<TrackerThreadResponse>,
 }
 
 fn create_tracker(announce: String) -> Box<dyn TrackerClient> {
@@ -68,12 +70,17 @@ fn create_tracker(announce: String) -> Box<dyn TrackerClient> {
 }
 
 impl TrackerData {
-    pub fn new(announce: String, send: Sender<ControllerInputMessage>) -> Self {
+    pub fn new(
+        announce: String,
+        send: Sender<TrackerThreadResponse>,
+        send_socket: Rc<UdpSocket>,
+    ) -> Self {
         Self {
             tracker: create_tracker(announce),
             interval: None,
             last_announce: None,
-            send,
+            send_socket,
+            send_chan: send,
         }
     }
 
@@ -103,12 +110,13 @@ impl TrackerData {
                 debug!("TrackerResponse: received");
                 self.interval = Some(Duration::from_secs(interval.try_into().unwrap()));
                 self.last_announce = Some(Instant::now());
-                self.send
-                    .send(ControllerInputMessage::Tracker(TrackerReponse::Announce {
+                self.send_chan
+                    .send(TrackerThreadResponse::Announce {
                         info_hash,
                         peer_list,
-                    }))
-                    .unwrap()
+                    })
+                    .unwrap();
+                self.send_socket.send(&[1]).unwrap();
             }
             Err(error) => panic!("Error while announcing to tracker: {:?}", error),
         }
@@ -139,15 +147,23 @@ impl TrackersData {
 
 pub struct TrackerManager {
     torrents: HashMap<Sha1Hash, TrackersData>,
-    send: Sender<ControllerInputMessage>,
+    send_socket: Rc<UdpSocket>,
+    send_chan: Sender<TrackerThreadResponse>,
     recv: Receiver<TrackerRequest>,
 }
 
 impl TrackerManager {
-    pub fn new(recv: Receiver<TrackerRequest>, send: Sender<ControllerInputMessage>) -> Self {
+    pub fn new(
+        recv: Receiver<TrackerRequest>,
+        send: Sender<TrackerThreadResponse>,
+        send_socket_addr: SocketAddr,
+    ) -> Self {
+        let send_socket = new_udp_socket();
+        send_socket.connect(send_socket_addr).unwrap();
         Self {
             torrents: HashMap::new(),
-            send,
+            send_socket: send_socket.into(),
+            send_chan: send,
             recv,
         }
     }
@@ -184,7 +200,11 @@ impl TrackerManager {
                         peer_id,
                     })
                     .trackers
-                    .push(TrackerData::new(announce_url, self.send.clone())),
+                    .push(TrackerData::new(
+                        announce_url,
+                        self.send_chan.clone(),
+                        self.send_socket.clone(),
+                    )),
                 TrackerRequest::Stop => break,
             }
         }

@@ -1,5 +1,8 @@
-use std::error::Error;
+use std::io::Write;
 use std::net::SocketAddr;
+use std::{error::Error, io::Read};
+
+use write_to::{ReadFrom, WriteTo};
 
 use crate::common::{Sha1Hash, PEER_ID_LENGTH};
 
@@ -16,7 +19,7 @@ pub trait TrackerClient {
     ) -> Result<TrackerResponse, Box<dyn Error>>;
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, WriteTo, ReadFrom)]
 pub struct PeerInfo {
     pub addr: SocketAddr,
     pub id: Option<[u8; PEER_ID_LENGTH]>,
@@ -36,12 +39,33 @@ pub struct TrackerResponse {
     pub interval: i64,
 }
 
-#[derive(Debug)]
+#[repr(u8)]
+#[derive(Debug, Clone)]
 pub enum EventKind {
-    Started,
+    Started = 0,
     Completed,
     Stopped,
     Empty,
+}
+
+impl ReadFrom for EventKind {
+    fn read_from<T: Read>(reader: &mut T, length: usize) -> std::io::Result<(Self, usize)> {
+        let mut buffer = [0; 1];
+        reader.read_exact(&mut buffer)?;
+        if buffer[0] > 3 {
+            return Err(std::io::ErrorKind::InvalidData.into());
+        }
+        let result: EventKind = unsafe { std::mem::transmute(buffer[0] as u8) };
+        Ok((result, length - 1))
+    }
+}
+
+impl WriteTo for EventKind {
+    fn write_to<T: Write>(&self, writer: &mut T) -> std::io::Result<()> {
+        let value = *self as u8;
+        writer.write_all(&[value])?;
+        Ok(())
+    }
 }
 
 impl EventKind {

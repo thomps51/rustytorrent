@@ -1,5 +1,5 @@
 use log::debug;
-use mio::Token;
+use mio::{Interest, Poll, Token};
 
 use crate::common::{Sha1Hash, PEER_ID_LENGTH};
 use crate::io::ReadBuffer;
@@ -113,5 +113,17 @@ impl HandshakingConnection {
             conn_type: Type::Outgoing,
             peer_id,
         }
+    }
+
+    pub fn register(&mut self, poll: &mut Poll, token: Token, interests: Interest) {
+        poll.registry()
+            .register(&mut self.stream, token, interests)
+            .unwrap();
+    }
+
+    pub fn reregister(&mut self, poll: &Poll, token: Token, interests: Interest) {
+        poll.registry()
+            .reregister(&mut self.stream, token, interests)
+            .unwrap();
     }
 }

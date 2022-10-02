@@ -1,7 +1,9 @@
 use log::info;
+use mio::net::UdpSocket;
 use std::collections::HashMap;
 use std::fs;
 use std::io::{SeekFrom, Write};
+use std::net::SocketAddr;
 use std::path::Path;
 use std::{
     path::PathBuf,
@@ -12,9 +14,8 @@ use bit_vec::BitVec;
 use mio::Token;
 use std::io::{self, Read, Seek};
 
-use crate::common::{is_valid_piece, File};
+use crate::common::{is_valid_piece, new_udp_socket, File};
 
-use super::controller::ControllerInputMessage;
 use crate::{
     common::{MetaInfo, Sha1Hash},
     messages::{Block, Request},
@@ -181,15 +182,23 @@ impl TorrentData {
 
 pub struct DiskManager {
     recv: Receiver<DiskRequest>,
-    sender: Sender<ControllerInputMessage>,
+    sender: Sender<DiskResponse>,
+    send_socket: UdpSocket,
     torrents: HashMap<Sha1Hash, TorrentData>,
 }
 
 impl DiskManager {
-    pub fn new(recv: Receiver<DiskRequest>, sender: Sender<ControllerInputMessage>) -> Self {
+    pub fn new(
+        recv: Receiver<DiskRequest>,
+        sender: Sender<DiskResponse>,
+        send_socket_addr: SocketAddr,
+    ) -> Self {
+        let send_socket = new_udp_socket();
+        send_socket.connect(send_socket_addr).unwrap();
         Self {
             recv,
             sender,
+            send_socket,
             torrents: HashMap::new(),
         }
     }
@@ -214,9 +223,8 @@ impl DiskManager {
             DiskRequest::Stop => panic!("Handled elsewhere"),
         };
         if let Some(response) = response {
-            self.sender
-                .send(ControllerInputMessage::Disk(response))
-                .unwrap();
+            self.sender.send(response).unwrap();
+            self.send_socket.send(&[1]).unwrap();
         }
         Ok(())
     }
@@ -229,11 +237,9 @@ impl DiskManager {
             }
             if let Err(error) = self.handle_message(&message) {
                 self.sender
-                    .send(ControllerInputMessage::Disk(DiskResponse::Error {
-                        message,
-                        error,
-                    }))
+                    .send(DiskResponse::Error { message, error })
                     .unwrap();
+                self.send_socket.send(&[1]).unwrap();
             }
         }
     }

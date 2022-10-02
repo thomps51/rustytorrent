@@ -65,7 +65,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 listen_port: 6800,
                 max_peers: 100,
                 seed: false,
-                print_output: false,
+                print_output: true,
             },
             d_sender,
             d_recv,

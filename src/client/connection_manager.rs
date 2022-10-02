@@ -1,4 +1,5 @@
 use rand::{distributions::Alphanumeric, Rng};
+use rccell::RcCell;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::convert::TryInto;
@@ -9,18 +10,16 @@ use std::sync::mpsc::Sender;
 use bit_vec::BitVec;
 use log::{debug, info, warn};
 use mio::net::{TcpListener, TcpStream};
-use mio::{Interest, Token};
+use mio::{Interest, Poll, Token};
 use std::net::SocketAddr;
 
 use super::block_cache::BlockCache;
 use super::disk_manager::DiskRequest;
-use super::network_poller_manager::PollerRequest;
 use super::piece_info::PieceInfo;
 use super::tracker_manager::TrackerRequest;
 use super::{piece_assigner::PieceAssigner, HandshakingConnection};
 use super::{
-    Connection, EstablishedConnection, HandshakeUpdateSuccess, NetworkSource, UpdateError,
-    UpdateSuccess,
+    Connection, EstablishedConnection, HandshakeUpdateSuccess, UpdateError, UpdateSuccess,
 };
 use crate::client::connection::ConnectionBase;
 use crate::common::PEER_ID_PREFIX;
@@ -42,11 +41,10 @@ pub struct ConnectionManager {
     config: ConnectionManagerConfig,
     listener: TcpListener,
     peer_id: [u8; PEER_ID_LENGTH],
-    poll_sender: Sender<PollerRequest>,
-    connecting: HashMap<Token, (Sha1Hash, NetworkSource, PeerInfo)>,
     tracker_sender: Sender<TrackerRequest>,
     token_to_info_hash: HashMap<Token, Sha1Hash>,
     read_buffer: ReadBuffer,
+    poll: RcCell<Poll>,
 }
 
 pub struct ConnectionManagerConfig {
@@ -144,7 +142,7 @@ impl PeersData {
 impl ConnectionManager {
     pub fn new(
         config: ConnectionManagerConfig,
-        poll_sender: Sender<PollerRequest>,
+        poll: RcCell<Poll>,
         listener: TcpListener,
         tracker_sender: Sender<TrackerRequest>,
     ) -> Self {
@@ -164,63 +162,17 @@ impl ConnectionManager {
             config,
             listener,
             peer_id: peer_id.into_bytes().try_into().unwrap(),
-            poll_sender,
-            connecting: HashMap::new(),
             tracker_sender,
             token_to_info_hash: HashMap::new(),
             read_buffer: ReadBuffer::new(1 << 20), // 1 MiB
+            poll,
         }
-    }
-
-    pub fn add_incoming_connection(
-        &mut self,
-        stream: NetworkSource,
-        token: Token,
-        _peer_info: PeerInfo,
-    ) {
-        debug!("Adding incoming connection");
-        let peer = HandshakingConnection::new_from_incoming(stream, token, self.peer_id);
-        self.connections
-            .insert(token, Connection::Handshaking(peer));
-        self.handle_event(token);
-        debug!("Done incoming connection");
     }
 
     pub fn reregister_connected(&mut self, token: Token) {
-        if let Some((info_hash, source, peer_info)) = self.connecting.remove(&token) {
-            self.poll_sender
-                .send(PollerRequest::Reregister {
-                    info_hash: Some(info_hash),
-                    source,
-                    token,
-                    interests: Interest::READABLE,
-                    peer_info,
-                })
-                .unwrap();
+        if let Some(Connection::Handshaking(peer)) = self.connections.get_mut(&token) {
+            peer.reregister(&self.poll.borrow(), token, Interest::READABLE);
         }
-    }
-
-    pub fn start_outgoing_connection(
-        &mut self,
-        info_hash: Sha1Hash,
-        source: NetworkSource,
-        token: Token,
-    ) {
-        let peer = HandshakingConnection::new_from_outgoing(source, info_hash, token, self.peer_id);
-        self.connections
-            .insert(token, Connection::Handshaking(peer));
-        self.handle_event(token);
-    }
-
-    pub fn add_outgoing_connection(
-        &mut self,
-        stream: NetworkSource,
-        token: Token,
-        peer_info: PeerInfo,
-        info_hash: Sha1Hash,
-    ) {
-        self.connecting
-            .insert(token, (info_hash, stream, peer_info));
     }
 
     pub fn start_torrent(
@@ -282,19 +234,21 @@ impl ConnectionManager {
     pub fn accept_connections(&mut self) {
         loop {
             match self.listener.accept() {
-                Ok((stream, addr)) => {
+                Ok((mut stream, _)) => {
                     let token = Token(self.next_socket_index);
-                    let peer_info = PeerInfo::new_from_addr(addr);
-                    self.poll_sender
-                        .send(PollerRequest::Register {
-                            info_hash: None,
-                            source: Box::new(stream),
-                            token,
-                            interests: Interest::READABLE,
-                            peer_info,
-                        })
-                        .unwrap();
                     self.next_socket_index += 1;
+                    self.poll
+                        .borrow()
+                        .registry()
+                        .register(&mut stream, token, Interest::READABLE)
+                        .unwrap();
+                    let peer = HandshakingConnection::new_from_incoming(
+                        Box::new(stream),
+                        token,
+                        self.peer_id,
+                    );
+                    self.connections
+                        .insert(token, Connection::Handshaking(peer));
                 }
                 Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                     break;
@@ -386,8 +340,7 @@ impl ConnectionManager {
                 .insert(token, Connection::Established(promoted));
         }
         // Need to call update logic on promoted connection in case we missed reading any messages
-        self.handle_event(token);
-        Ok(())
+        self.handle_event_inner(token)
     }
 
     fn disconnect_peer(&mut self, token: Token, error: UpdateError) {
@@ -398,11 +351,10 @@ impl ConnectionManager {
             }
         }
         if let Some(connection) = self.connections.remove(&token) {
-            self.poll_sender
-                .send(PollerRequest::Deregister {
-                    source: connection.into_network_source(),
-                    token,
-                })
+            self.poll
+                .borrow()
+                .registry()
+                .deregister(&mut connection.into_network_source())
                 .unwrap();
         }
     }
@@ -439,7 +391,7 @@ impl ConnectionManager {
         for peer_info in peer_list {
             debug!("Attempting connection to peer: {:?}", peer_info);
 
-            let stream = match TcpStream::connect(peer_info.addr) {
+            let mut stream = match TcpStream::connect(peer_info.addr) {
                 Ok(stream) => stream,
                 Err(error) => {
                     info!("Unable to connect to {}: {:?}", peer_info.addr, error);
@@ -450,15 +402,19 @@ impl ConnectionManager {
             torrent.peers_data.connected(token, peer_info.clone());
             self.next_socket_index += 1;
             // Registering the socket for Writable notifications will tell us when it is connected.
-            self.poll_sender
-                .send(PollerRequest::Register {
-                    info_hash: Some(torrent.info_hash),
-                    source: Box::new(stream),
-                    token,
-                    interests: Interest::WRITABLE,
-                    peer_info,
-                })
+            self.poll
+                .borrow()
+                .registry()
+                .register(&mut stream, token, Interest::WRITABLE)
                 .unwrap();
+            let peer = HandshakingConnection::new_from_outgoing(
+                Box::new(stream),
+                torrent.info_hash,
+                token,
+                self.peer_id,
+            );
+            self.connections
+                .insert(token, Connection::Handshaking(peer));
         }
     }
 
