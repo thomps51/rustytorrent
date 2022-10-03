@@ -31,7 +31,7 @@ use crate::messages::ProtocolMessage;
 // 200   : 32 MiB/s
 // I likely want a dynamic value based on if the peer completed it's requested pieces within a certain amount of time.
 // Could also do it as a function of ping
-pub const MAX_OPEN_REQUESTS_PER_PEER: usize = 10;
+pub const MAX_OPEN_REQUESTS_PER_PEER: usize = 100;
 
 // Manages requests and receipts of blocks.
 pub struct BlockManager {
@@ -70,8 +70,24 @@ impl BlockManager {
         id: usize,
     ) -> Result<usize, std::io::Error> {
         let mut sent = 0;
-        let mut is_endgame = false;
+        let is_endgame = self.endgame_sent_blocks.len() > 0;
+        if is_endgame {
+            let (blocks_in_flight, cancels) = self
+                .block_cache
+                .borrow()
+                .reconcile(&mut self.endgame_sent_blocks);
+            if self.blocks_in_flight != blocks_in_flight {
+                debug!("Reconciled blocks in flight");
+            }
+            self.blocks_in_flight = blocks_in_flight;
+            for cancel in cancels {
+                cancel.write(stream)?;
+            }
+        }
         let mut piece_assigner = self.piece_assigner.borrow_mut();
+        if self.blocks_in_flight == MAX_OPEN_REQUESTS_PER_PEER {
+            debug!("Max open requests per peer hit");
+        }
         while self.blocks_in_flight < MAX_OPEN_REQUESTS_PER_PEER {
             match piece_assigner.get_block(&peer_has, id, || {
                 self.block_cache.borrow().endgame_get_unreceived_blocks()
@@ -87,7 +103,6 @@ impl BlockManager {
                 AssignedBlockResult::EndgameAssignedBlock { request } => {
                     debug!("Endgame assigned block: {:?}", request);
                     request.write(stream)?;
-                    is_endgame = true;
                     self.endgame_sent_blocks
                         .entry(request.piece_index())
                         .or_insert(BitVec::from_elem(
@@ -101,16 +116,6 @@ impl BlockManager {
             }
             self.blocks_in_flight += 1;
             sent += 1;
-        }
-        if is_endgame {
-            let (blocks_in_flight, cancels) = self
-                .block_cache
-                .borrow()
-                .reconcile(&mut self.endgame_sent_blocks);
-            self.blocks_in_flight = blocks_in_flight;
-            for cancel in cancels {
-                cancel.write(stream)?;
-            }
         }
         Ok(sent)
     }
