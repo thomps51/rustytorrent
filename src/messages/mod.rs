@@ -230,6 +230,25 @@ impl Block {
         block_manager.add_block(BlockReader::new(reader, begin as _, index as _, length))?;
         Ok(UpdateSuccess::Success)
     }
+
+    pub fn read_and_update_utp<T: Read>(
+        reader: &mut T,
+        block_manager: &mut BlockManager,
+        length: usize,
+    ) -> UpdateResult {
+        // Combining read and update allows us to send the data straight where it needs to go instead
+        // of copying it into the buffer and then copying it to the store.
+        let (index, length) = u32::read_from(reader, length)?;
+        let (begin, length) = u32::read_from(reader, length)?;
+        log::debug!(
+            "Reading and updating from Block message, index: {}, begin: {}, size: {}",
+            index,
+            begin,
+            length,
+        );
+        block_manager.add_block(BlockReader::new(reader, begin as _, index as _, length))?;
+        Ok(UpdateSuccess::Success)
+    }
 }
 
 impl ProtocolMessage for Cancel {

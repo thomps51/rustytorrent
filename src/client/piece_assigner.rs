@@ -74,7 +74,7 @@ impl PieceAssigner {
         connection_id: usize,
         unreceived: F,
     ) -> AssignedBlockResult {
-        if self.endgame_unreceived_blocks.len() > 0 {
+        if !self.endgame_unreceived_blocks.is_empty() {
             self.endgame = true;
             let pieces_assigned = self.assigned.entry(connection_id).or_default();
             let mut request = None;
@@ -91,7 +91,7 @@ impl PieceAssigner {
                 request = Some((pos, block_request.clone()));
                 break;
             }
-            if let None = request {
+            if request.is_none() {
                 info!(
                     "Connection {} has already requested all unreceived blocks once",
                     connection_id
@@ -102,45 +102,41 @@ impl PieceAssigner {
             self.endgame_unreceived_blocks.remove(pos);
             return AssignedBlockResult::EndgameAssignedBlock { request };
         }
-        if self.pieces.len() == 0 && self.current_piece.is_none() {
-            if self.pieces.len() == 0 {
-                // Throttle calls to unreceived because they are expensive and blocks will likely
-                // be in flight
-                if self.prev_unreceived_call.elapsed() < std::time::Duration::from_secs(1) {
-                    info!("Throttling blocks requests sent");
-                    return AssignedBlockResult::NoBlocksToAssign;
-                }
-                self.endgame_unreceived_blocks = unreceived();
-                info!(
-                    "endgame unreceived blocks: {}",
-                    self.endgame_unreceived_blocks.len()
-                );
-                self.prev_unreceived_call = Instant::now();
-                if self.endgame_unreceived_blocks.is_empty() {
-                    info!("No more unreceived blocks!");
-                    return AssignedBlockResult::NoBlocksToAssign;
-                }
-                return self.get_block(peer_has, connection_id, unreceived);
+        if self.pieces.is_empty() && self.current_piece.is_none() && self.pieces.is_empty() {
+            // Throttle calls to unreceived because they are expensive and blocks will likely
+            // be in flight
+            if self.prev_unreceived_call.elapsed() < std::time::Duration::from_secs(1) {
+                info!("Throttling blocks requests sent");
+                return AssignedBlockResult::NoBlocksToAssign;
             }
+            self.endgame_unreceived_blocks = unreceived();
+            info!(
+                "endgame unreceived blocks: {}",
+                self.endgame_unreceived_blocks.len()
+            );
+            self.prev_unreceived_call = Instant::now();
+            if self.endgame_unreceived_blocks.is_empty() {
+                info!("No more unreceived blocks!");
+                return AssignedBlockResult::NoBlocksToAssign;
+            }
+            return self.get_block(peer_has, connection_id, unreceived);
         }
         let current_piece = {
             if let Some(value) = self.current_piece {
                 value
+            } else if peer_has.all() {
+                self.pieces.pop_front().unwrap()
             } else {
-                if peer_has.all() {
-                    self.pieces.pop_front().unwrap()
+                // If the peer doesn't have all the pieces, we look for the first piece that we
+                // haven't yet assigned that the peer does have.
+                let mut intersection = peer_has.clone();
+                intersection.and(&self.left);
+                if let Some(index) = intersection.iter().position(|x| x) {
+                    self.pieces.retain(|x| *x != index);
+                    index
                 } else {
-                    // If the peer doesn't have all the pieces, we look for the first piece that we
-                    // haven't yet assigned that the peer does have.
-                    let mut intersection = peer_has.clone();
-                    intersection.and(&self.left);
-                    if let Some(index) = intersection.iter().position(|x| x == true) {
-                        self.pieces.retain(|x| *x != index);
-                        index
-                    } else {
-                        debug!("Peer does not have any blocks for me to request");
-                        return AssignedBlockResult::NoBlocksToAssign;
-                    }
+                    debug!("Peer does not have any blocks for me to request");
+                    return AssignedBlockResult::NoBlocksToAssign;
                 }
             }
         };
@@ -158,6 +154,6 @@ impl PieceAssigner {
     }
 
     pub fn is_endgame(&self) -> bool {
-        return self.endgame;
+        self.endgame
     }
 }

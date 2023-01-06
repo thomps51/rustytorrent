@@ -36,7 +36,7 @@ impl<'a> Parser<'a> {
     }
 
     fn get_length_prefix(&self, data: &[u8]) -> Result<(usize, usize), ParseError> {
-        if let Some(index) = data.iter().position(|c| *c == ':' as u8) {
+        if let Some(index) = data.iter().position(|c| *c == b':') {
             let as_str = self.to_string(&data[0..index])?;
             Ok((self.parse_usize(as_str)?, index + 1))
         } else {
@@ -46,18 +46,18 @@ impl<'a> Parser<'a> {
     }
 
     pub fn new(data: &[u8]) -> Parser {
-        return Parser {
+        Parser {
             current_index: 0,
-            data: data,
+            data,
             //error: "".into(),
-        };
+        }
     }
 
     fn parse_dictionary(&mut self, data: &[u8]) -> Result<(Dictionary, usize), ParseError> {
-        debug_assert!(data[0] == 'd' as u8);
+        debug_assert!(data[0] == b'd');
         let mut result = Dictionary::new();
         let mut index = 1;
-        while data[index] != 'e' as u8 {
+        while data[index] != b'e' {
             let (key, spent) = self.parse_string(&data[index..])?;
             index += spent;
             let (value, spent) = self.parse(&data[index..])?;
@@ -68,8 +68,8 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_integer(&self, data: &[u8]) -> Result<(i64, usize), ParseError> {
-        debug_assert!(data[0] == 'i' as u8);
-        if let Some(index) = data.iter().position(|c| *c == 'e' as u8) {
+        debug_assert!(data[0] == b'i');
+        if let Some(index) = data.iter().position(|c| *c == b'e') {
             let as_str = self.to_string(&data[1..index])?;
             let parsed = self.parse_i64(as_str)?;
             Ok((parsed, index + 1))
@@ -80,10 +80,10 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_list(&mut self, data: &[u8]) -> Result<(Vec<DataKind>, usize), ParseError> {
-        debug_assert!(data[0] == 'l' as u8);
+        debug_assert!(data[0] == b'l');
         let mut index = 1;
         let mut result = Vec::new();
-        while data[index] != 'e' as u8 {
+        while data[index] != b'e' {
             let (data, spent) = self.parse(&data[index..])?;
             index += spent;
             result.push(data);
@@ -231,26 +231,26 @@ mod tests {
     #[test]
     fn parse_integer_test() {
         let text = "i-3e".as_bytes();
-        let result = parse(&text).unwrap();
+        let result = parse(text).unwrap();
         assert_eq!(result.as_int().unwrap(), -3);
     }
     #[test]
     fn parse_string_test() {
         let text = "3:cow".as_bytes();
-        let result = parse(&text).unwrap();
+        let result = parse(text).unwrap();
         assert_eq!(result.as_utf8().unwrap(), "cow");
     }
     #[test]
     fn parse_list_test() {
         let text = "l4:spam4:eggse".as_bytes();
-        let result = parse(&text).unwrap();
+        let result = parse(text).unwrap();
         let expected = vec![DataKind::Data("spam".into()), DataKind::Data("eggs".into())];
         assert_eq!(*result.as_list().unwrap(), expected);
     }
     #[test]
     fn parse_list_of_list_test() {
         let text = "ll4:spam4:eggse4:spam4:eggse".as_bytes();
-        let result = parse(&text).unwrap();
+        let result = parse(text).unwrap();
         let expected = vec![
             DataKind::List(vec![
                 DataKind::Data("spam".into()),
@@ -264,7 +264,7 @@ mod tests {
     #[test]
     fn parse_dictionary_test() {
         let text = "d3:cow3:moo4:spam4:eggse".as_bytes();
-        let result = parse(&text).unwrap();
+        let result = parse(text).unwrap();
         let mut map = Dictionary::new();
         map.insert("cow".into(), DataKind::Data("moo".into()));
         map.insert("spam".into(), DataKind::Data("eggs".into()));
@@ -274,7 +274,7 @@ mod tests {
     #[test]
     fn parse_dictionary_with_dictionary_test() {
         let text = "d3:cow3:moo4:spamd3:cow3:mooee".as_bytes();
-        let result = parse(&text).unwrap();
+        let result = parse(text).unwrap();
         let mut map = Dictionary::new();
         map.insert("cow".into(), DataKind::Data("moo".into()));
         map.insert("spam".into(), DataKind::Dictionary(map.clone()));

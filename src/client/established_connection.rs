@@ -6,7 +6,7 @@ use log::{debug, info};
 use mio::Token;
 
 use super::block_manager::BlockManager;
-use super::disk_manager::DiskRequest;
+use super::disk_manager::{ConnectionIdentifier, DiskRequest};
 use super::{ConnectionBase, NetworkSource, UpdateError, UpdateResult, UpdateSuccess};
 use crate::common::{Sha1Hash, SharedBlockCache, SharedCount, SharedPieceAssigner};
 use crate::io::ReadBuffer;
@@ -191,7 +191,7 @@ impl EstablishedConnection {
     // buffer at the expense of the next message we are trying to send.
     pub fn send<T: ProtocolMessage>(&mut self, message: &T) -> Result<bool, std::io::Error> {
         let mut result = false;
-        if self.send_buffer.len() == 0 {
+        if self.send_buffer.is_empty() {
             debug!(
                 "Writing message {} with id {} and length {}, be_length: {:?}, from_be: {}, from_le: {}",
                 T::NAME,
@@ -227,7 +227,7 @@ impl EstablishedConnection {
         self.disk_requester
             .send(DiskRequest::Request {
                 info_hash: self.info_hash,
-                token: Token(self.id),
+                conn_id: ConnectionIdentifier::TcpToken(Token(self.id)),
                 request,
             })
             .unwrap();
@@ -236,11 +236,14 @@ impl EstablishedConnection {
     fn send_block_requests(&mut self) -> UpdateResult {
         if !self.peer_choking {
             debug!("Peer is not choking");
+            self.send_buffer.clear();
             let sent = self.block_manager.send_block_requests(
-                &mut self.stream,
+                &mut self.send_buffer,
                 &self.peer_has,
                 self.id,
             )?;
+            self.stream.write_all(&self.send_buffer)?;
+            self.send_buffer.clear();
             if sent == 0 {
                 debug!("No block requests sent");
                 return Ok(UpdateSuccess::NoUpdate);

@@ -108,7 +108,7 @@ where
     if let Some(v) = dict.get(name) {
         Ok(v.clone().try_into()?)
     } else {
-        Err(format!("dictionary is missing '{}' key", name).into())
+        Err(format!("dictionary is missing '{name}' key").into())
     }
 }
 
@@ -137,7 +137,7 @@ pub struct ConvertError {
 
 impl std::fmt::Display for ConvertError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        f.write_str(&self.message)
+        f.write_str(self.message)
     }
 }
 
@@ -176,7 +176,7 @@ impl TryFrom<DataKind> for usize {
     fn try_from(value: DataKind) -> Result<usize, Self::Error> {
         if let DataKind::Integer(v) = value {
             if let Ok(us) = v.try_into() {
-                return Ok(us);
+                Ok(us)
             } else {
                 Err(ConvertError::new("DataKind is Integer, but negative"))
             }

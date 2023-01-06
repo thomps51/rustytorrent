@@ -21,7 +21,7 @@ impl Encode for &[u8] {
 
     fn bencode_to<T: Write>(&self, writer: &mut T) -> std::io::Result<()> {
         write!(writer, "{}:", self.len())?;
-        writer.write_all(&self)?;
+        writer.write_all(self)?;
         Ok(())
     }
 }
@@ -60,11 +60,11 @@ impl Encode for &str {
 
 impl Encode for i64 {
     fn bencode(&self) -> Vec<u8> {
-        format!("i{}e", self).into_bytes()
+        format!("i{self}e").into_bytes()
     }
 
     fn bencode_to<T: Write>(&self, writer: &mut T) -> std::io::Result<()> {
-        write!(writer, "i{}e", self)?;
+        write!(writer, "i{self}e")?;
         Ok(())
     }
 }
@@ -77,11 +77,11 @@ impl Encode for List {
     }
 
     fn bencode_to<T: Write>(&self, writer: &mut T) -> std::io::Result<()> {
-        writer.write_all(&['l' as u8])?;
+        writer.write_all(&[b'l'])?;
         for element in self {
             element.bencode_to(writer)?;
         }
-        writer.write_all(&['e' as u8])?;
+        writer.write_all(&[b'e'])?;
         Ok(())
     }
 }
@@ -94,12 +94,12 @@ impl Encode for Dictionary {
     }
 
     fn bencode_to<T: Write>(&self, writer: &mut T) -> std::io::Result<()> {
-        writer.write_all(&['d' as u8])?;
+        writer.write_all(&[b'd'])?;
         for (key, value) in self.iter() {
             key.bencode_to(writer)?;
             value.bencode_to(writer)?;
         }
-        writer.write_all(&['e' as u8])?;
+        writer.write_all(&[b'e'])?;
         Ok(())
     }
 }
@@ -131,7 +131,7 @@ mod tests {
     #[test]
     fn encode_integer_test() {
         let expected = "i-3e".as_bytes();
-        let result = (-3 as i64).bencode();
+        let result = (-3_i64).bencode();
         assert_eq!(expected, result.as_slice());
     }
     #[test]

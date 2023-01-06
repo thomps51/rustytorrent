@@ -6,6 +6,7 @@ use std::io::prelude::*;
 use bit_vec::BitVec;
 
 use super::piece_assigner::AssignedBlockResult;
+use super::utp::UtpSocket;
 use crate::common::SharedBlockCache;
 use crate::common::SharedPieceAssigner;
 use crate::messages::BlockReader;
@@ -31,7 +32,7 @@ use crate::messages::ProtocolMessage;
 // 200   : 32 MiB/s
 // I likely want a dynamic value based on if the peer completed it's requested pieces within a certain amount of time.
 // Could also do it as a function of ping
-pub const MAX_OPEN_REQUESTS_PER_PEER: usize = 100;
+pub const MAX_OPEN_REQUESTS_PER_PEER: usize = 10;
 
 // Manages requests and receipts of blocks.
 pub struct BlockManager {
@@ -70,7 +71,7 @@ impl BlockManager {
         id: usize,
     ) -> Result<usize, std::io::Error> {
         let mut sent = 0;
-        let is_endgame = self.endgame_sent_blocks.len() > 0;
+        let is_endgame = !self.endgame_sent_blocks.is_empty();
         if is_endgame {
             let (blocks_in_flight, cancels) = self
                 .block_cache
@@ -89,7 +90,7 @@ impl BlockManager {
             debug!("Max open requests per peer hit");
         }
         while self.blocks_in_flight < MAX_OPEN_REQUESTS_PER_PEER {
-            match piece_assigner.get_block(&peer_has, id, || {
+            match piece_assigner.get_block(peer_has, id, || {
                 self.block_cache.borrow().endgame_get_unreceived_blocks()
             }) {
                 AssignedBlockResult::NoBlocksToAssign => {
@@ -117,6 +118,73 @@ impl BlockManager {
             self.blocks_in_flight += 1;
             sent += 1;
         }
+        // Batch writes together since writing many small messages to sockets aren't efficient.
+        // if sent > 0 {
+        //     stream.write_all(&self.write_buffer)?;
+        //     self.write_buffer.clear();
+        // }
+        Ok(sent)
+    }
+
+    pub fn send_block_requests_utp(
+        &mut self,
+        stream: &mut UtpSocket,
+        peer_has: &BitVec,
+        id: usize,
+    ) -> Result<usize, std::io::Error> {
+        let mut sent = 0;
+        let is_endgame = !self.endgame_sent_blocks.is_empty();
+        if is_endgame {
+            let (blocks_in_flight, cancels) = self
+                .block_cache
+                .borrow()
+                .reconcile(&mut self.endgame_sent_blocks);
+            if self.blocks_in_flight != blocks_in_flight {
+                debug!("Reconciled blocks in flight");
+            }
+            self.blocks_in_flight = blocks_in_flight;
+            for cancel in cancels {
+                stream.write(&cancel)?;
+            }
+        }
+        let mut piece_assigner = self.piece_assigner.borrow_mut();
+        if self.blocks_in_flight == MAX_OPEN_REQUESTS_PER_PEER {
+            debug!("Max open requests per peer hit");
+        }
+        while self.blocks_in_flight < MAX_OPEN_REQUESTS_PER_PEER {
+            match piece_assigner.get_block(peer_has, id, || {
+                self.block_cache.borrow().endgame_get_unreceived_blocks()
+            }) {
+                AssignedBlockResult::NoBlocksToAssign => {
+                    info!("no blocks to assign");
+                    break;
+                }
+                AssignedBlockResult::AssignedBlock { request } => {
+                    debug!("Assigned block: {:?}", request);
+                    stream.write(&request)?;
+                }
+                AssignedBlockResult::EndgameAssignedBlock { request } => {
+                    debug!("Endgame assigned block: {:?}", request);
+                    stream.write(&request)?;
+                    self.endgame_sent_blocks
+                        .entry(request.piece_index())
+                        .or_insert(BitVec::from_elem(
+                            piece_assigner
+                                .piece_info
+                                .get_num_blocks(request.piece_index()),
+                            false,
+                        ))
+                        .set(request.block_index(), true);
+                }
+            }
+            self.blocks_in_flight += 1;
+            sent += 1;
+        }
+        // Batch writes together since writing many small messages to sockets aren't efficient.
+        // if sent > 0 {
+        //     stream.write_all(&self.write_buffer)?;
+        //     self.write_buffer.clear();
+        // }
         Ok(sent)
     }
 }

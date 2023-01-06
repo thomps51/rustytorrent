@@ -35,14 +35,14 @@ pub fn bytes_to_uri(data: &[u8]) -> String {
         if c.is_ascii_alphanumeric() {
             result.push(c);
         } else {
-            let hex = format!("%{:02X}", byte);
+            let hex = format!("%{byte:02X}");
             result.push_str(&hex);
         }
     }
     result
 }
 
-pub fn is_valid_piece(piece: &[u8], index: usize, piece_hashes: &Vec<Sha1Hash>) -> bool {
+pub fn is_valid_piece(piece: &[u8], index: usize, piece_hashes: &[Sha1Hash]) -> bool {
     let actual = hash_to_bytes(piece);
     let expected = piece_hashes[index];
     actual == expected

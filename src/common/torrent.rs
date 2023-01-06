@@ -34,7 +34,7 @@ impl Torrent {
         let metainfo = MetaInfo::from_dict(info)?;
         let total_size = metainfo.total_size;
         Ok(Torrent {
-            metainfo: metainfo,
+            metainfo,
             downloaded: 0,
             uploaded: 0,
             left: total_size,

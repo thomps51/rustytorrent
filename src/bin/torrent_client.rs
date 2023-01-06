@@ -62,10 +62,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     let d_thread = thread::spawn(move || {
         let mut downloader = Controller::new_from_channel(
             ControllerConfig {
-                listen_port: 6800,
+                listen_port: 6801,
                 max_peers: 100,
                 seed: false,
-                print_output: true,
+                print_output: false,
             },
             d_sender,
             d_recv,

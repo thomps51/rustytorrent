@@ -51,6 +51,10 @@ impl<'a, T: Read> BlockReader<'a, T> {
     pub fn len(&self) -> usize {
         self.length
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 }
 
 impl<'a, T: Read> Drop for BlockReader<'a, T> {

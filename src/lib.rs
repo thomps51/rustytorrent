@@ -1,6 +1,8 @@
 // #![feature(adt_const_params)]
 // #![feature(generic_const_exprs)]
 #![feature(try_blocks)]
+#![feature(let_chains)]
+#![feature(read_buf)]
 pub mod bencoding;
 // pub use bencoding::*;
 

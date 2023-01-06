@@ -28,7 +28,7 @@ impl UdpTracker {
     const PROTOCOL_ID: i64 = 0x41727101980;
 
     pub fn new(address: &str) -> Self {
-        let socket = UdpSocket::bind("0.0.0.0:0").unwrap();
+        let socket = UdpSocket::bind("0.0.0.0:7000").unwrap();
         // remove beginning udp://
         // remove trailing /announce
         let address = address.trim_end_matches("/announce")[6..].to_string();
@@ -44,7 +44,7 @@ impl UdpTracker {
 
 #[allow(dead_code)]
 #[derive(Copy, Clone)]
-enum Action {
+pub enum Action {
     Connect = 0,
     Announce = 1,
     Scrape = 2,
@@ -99,6 +99,7 @@ impl TrackerClient for UdpTracker {
             transaction_id,
         });
         let response: ConnectResponse = self.recv()?;
+        debug!("UDP Tracker received connect response");
         let transaction_id: i32 = rng.gen();
         let key: u32 = rng.gen(); // no idea
         let request = AnnounceRequest {

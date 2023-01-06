@@ -23,6 +23,12 @@ use crate::{
 
 pub type AllocatedFiles = HashMap<PathBuf, fs::File>;
 
+#[derive(Debug, Clone, Copy)]
+pub enum ConnectionIdentifier {
+    TcpToken(Token),
+    UtpId(SocketAddr),
+}
+
 // Going to separate Read and Write disk IO threads for now, may combine later.
 
 // Messages sent to the Read thread
@@ -31,7 +37,7 @@ pub enum DiskRequest {
     // Thread needs to read disk for these requests, and send completed reads to the main thread to process
     Request {
         info_hash: Sha1Hash,
-        token: Token,
+        conn_id: ConnectionIdentifier,
         request: Request,
     },
     // Add files from a new torrent
@@ -52,7 +58,7 @@ pub enum DiskRequest {
 pub enum DiskResponse {
     RequestCompleted {
         info_hash: Sha1Hash,
-        token: Token,
+        conn_id: ConnectionIdentifier,
         block: Block,
     },
     AddTorrentCompleted {
@@ -63,6 +69,10 @@ pub enum DiskResponse {
         info_hash: Sha1Hash,
         piece_index: usize,
         final_piece: bool,
+    },
+    WritePieceFailedHash {
+        info_hash: Sha1Hash,
+        piece_index: usize,
     },
     Error {
         message: DiskRequest,
@@ -168,7 +178,7 @@ impl TorrentData {
         let mut have_count = 0;
         for i in 0..self.num_pieces {
             let piece = self.get_bytes(i, 0, self.get_piece_length(i))?;
-            if !is_valid_piece(&piece, i, &pieces) {
+            if !is_valid_piece(&piece, i, pieces) {
                 continue;
             }
             have_count += 1;
@@ -209,12 +219,12 @@ impl DiskManager {
             DiskRequest::AddTorrent {
                 meta_info,
                 destination,
-            } => self.add_torrent(&meta_info, &destination)?,
+            } => self.add_torrent(meta_info, destination)?,
             DiskRequest::Request {
                 info_hash,
-                token,
+                conn_id,
                 request,
-            } => self.get_block(*info_hash, *token, &request)?,
+            } => self.get_block(*info_hash, *conn_id, request)?,
             DiskRequest::WritePiece {
                 info_hash,
                 index,
@@ -223,6 +233,7 @@ impl DiskManager {
             DiskRequest::Stop => panic!("Handled elsewhere"),
         };
         if let Some(response) = response {
+            // log::debug!("Sending disk response: {:?}", response);
             self.sender.send(response).unwrap();
             self.send_socket.send(&[1]).unwrap();
         }
@@ -236,6 +247,7 @@ impl DiskManager {
                 break;
             }
             if let Err(error) = self.handle_message(&message) {
+                log::debug!("Sending disk error response: {:?}", error);
                 self.sender
                     .send(DiskResponse::Error { message, error })
                     .unwrap();
@@ -311,7 +323,7 @@ impl DiskManager {
     fn get_block(
         &self,
         info_hash: Sha1Hash,
-        token: Token,
+        conn_id: ConnectionIdentifier,
         request: &Request,
     ) -> io::Result<Option<DiskResponse>> {
         let torrent_data = if let Some(torrent_data) = self.torrents.get(&info_hash) {
@@ -327,7 +339,7 @@ impl DiskManager {
         let block = Block::new(request, block_data);
         let result = DiskResponse::RequestCompleted {
             info_hash,
-            token,
+            conn_id,
             block,
         };
         Ok(Some(result))

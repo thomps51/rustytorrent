@@ -10,8 +10,8 @@ pub struct TestTrackerClient {
 
 impl TestTrackerClient {
     pub fn new_local(listen_port: u16) -> Self {
-        format!("0.0.0.0:{}", listen_port);
-        let ip_address = IpAddr::from_str("0.0.0.0").unwrap();
+        // format!("0.0.0.0:{}", listen_port);
+        let ip_address = IpAddr::from_str("127.0.0.1").unwrap();
         let addr = SocketAddr::new(ip_address, listen_port);
         Self {
             response: TrackerResponse {

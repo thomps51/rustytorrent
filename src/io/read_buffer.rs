@@ -1,6 +1,7 @@
 use std::io::ErrorKind;
 use std::io::Read;
 use std::io::Result;
+use std::io::Write;
 
 // This is pretty much std::io::ReadBuf except with the ability to "shift" the
 // Unread data to the beginning of the buffer.
@@ -36,6 +37,31 @@ impl Read for ReadBuffer {
     }
 }
 
+impl Write for ReadBuffer {
+    fn write(&mut self, buf: &[u8]) -> Result<usize> {
+        let remaining = self.capacity - self.unused_start;
+        let length = buf.len();
+        if length > remaining {
+            self.shift_left();
+            if length > remaining {
+                return Err(std::io::ErrorKind::OutOfMemory.into());
+            }
+        }
+        let unused = self.get_unused_mut();
+        unsafe {
+            let dst_ptr = unused.as_mut_ptr();
+            let src_ptr = buf.as_ptr();
+            std::ptr::copy_nonoverlapping(src_ptr, dst_ptr, length);
+        }
+        self.added_unused(length);
+        Ok(length)
+    }
+
+    fn flush(&mut self) -> Result<()> {
+        Ok(())
+    }
+}
+
 impl ReadBuffer {
     pub fn new(capacity: usize) -> Self {
         let mut buffer = Vec::new();
@@ -59,6 +85,14 @@ impl ReadBuffer {
 
     pub fn get_unread(&self) -> &[u8] {
         &self.buffer[self.unread_start..self.unused_start]
+    }
+
+    pub fn get_unused_mut(&mut self) -> &mut [u8] {
+        &mut self.buffer[self.unused_start..]
+    }
+
+    pub fn added_unused(&mut self, num: usize) {
+        self.unused_start += num;
     }
 
     // pub fn prepend_unread(&mut self, data: &[u8]) {
@@ -140,8 +174,8 @@ impl ReadBuffer {
         Ok(read >= need_to_read)
     }
 
-    fn shift_left(&mut self) {
-        self.shift(self.unread_start as isize * -1);
+    pub fn shift_left(&mut self) {
+        self.shift(-(self.unread_start as isize));
     }
 
     // Maybe more accurately shift_unread
@@ -150,7 +184,7 @@ impl ReadBuffer {
         let new_unread_start = self.unread_start as isize + amount;
         debug_assert!(new_unread_start >= 0 && new_unread_start < self.capacity as isize);
         unsafe {
-            let src = self.buffer.as_ptr().offset(self.unread_start as isize);
+            let src = self.buffer.as_ptr().add(self.unread_start);
             let dst = self.buffer.as_mut_ptr().offset(new_unread_start);
             std::ptr::copy(src, dst, size);
         }

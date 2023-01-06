@@ -24,12 +24,14 @@ pub mod piece_assigner;
 
 pub mod block_cache;
 
+// pub mod initiating_connection;
 pub mod tracker_manager;
+pub mod utp;
 
-pub trait NetworkSourceType: Source + Send + Write + Read + Debug {
+// pub trait NetworkSourceType: Source + Send + Write + Read + Debug {
+pub trait NetworkSourceType: Source + Write + Read + Debug {
     fn peer_addr(&self) -> std::io::Result<std::net::SocketAddr>;
 }
-// impl<T> NetworkSourceType for T where T: Source + Send + Write + Read + Debug {}
 
 impl NetworkSourceType for TcpStream {
     fn peer_addr(&self) -> std::io::Result<std::net::SocketAddr> {

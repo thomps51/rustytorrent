@@ -3,6 +3,7 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use crate::bencoding;
+use crate::bencoding::DataKind;
 use crate::common::hash;
 use crate::common::Sha1Hash;
 use crate::common::SHA1_HASH_LENGTH;
@@ -32,11 +33,20 @@ impl MetaInfo {
     // Create MetaInfo from a file which has a bencoded dictionary (torrent file).
     pub fn from_file(file: &Path) -> Result<MetaInfo, Box<dyn Error>> {
         let dict = bencoding::parse_into_dictionary(file)?;
-        Ok(Self::from_dict(dict)?)
+        Self::from_dict(dict)
     }
 
     pub fn from_dict(dict: Dictionary) -> Result<MetaInfo, Box<dyn Error>> {
-        let announce: String = get_as(&dict, "announce")?;
+        let announce: String =
+            if let Some(announce_list) = dict.get_as::<Vec<DataKind>>("announce-list")? {
+                // only grab the first for now
+                // list of lists
+                announce_list[0].as_list()?[0].as_utf8()?.to_owned()
+            } else if let Some(announce) = dict.get_as("announce")? {
+                announce
+            } else {
+                panic!("no announce");
+            };
         let info: Dictionary = get_as(&dict, "info")?;
         let piece_length: usize = get_as(&info, "piece length")?;
         let raw_pieces: Vec<u8> = get_as(&info, "pieces")?;
@@ -44,10 +54,10 @@ impl MetaInfo {
         let num_pieces = raw_pieces.len() / SHA1_HASH_LENGTH;
         let mut pieces = Vec::new();
         pieces.resize(num_pieces, [0; 20]);
-        for i in 0..num_pieces {
+        for (i, piece) in pieces.iter_mut().enumerate() {
             let start = i * SHA1_HASH_LENGTH;
             let end = start + SHA1_HASH_LENGTH;
-            pieces[i].copy_from_slice(&raw_pieces[start..end]);
+            piece.copy_from_slice(&raw_pieces[start..end]);
         }
         let mut files = Vec::new();
         let mut total_size = 0;
@@ -55,7 +65,7 @@ impl MetaInfo {
             // Single File Case
             let path: String = get_as(&info, "name")?;
             files.push(File {
-                length: length,
+                length,
                 path: path.into(),
             });
             total_size = length;
@@ -76,7 +86,7 @@ impl MetaInfo {
                 files.push(File { length, path });
             }
         }
-        let bencoded_info = info.clone().bencode();
+        let bencoded_info = info.bencode();
         let info_hash_uri = hash::hash_to_uri_str(&bencoded_info);
         let info_hash_raw = hash::hash_to_bytes(&bencoded_info);
         Ok(MetaInfo {

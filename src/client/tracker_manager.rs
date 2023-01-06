@@ -52,7 +52,7 @@ struct TrackerData {
 }
 
 fn create_tracker(announce: String) -> Box<dyn TrackerClient> {
-    const TEST_TRACKER: &'static str = "TestTrackerSelf";
+    const TEST_TRACKER: &str = "TestTrackerSelf";
     if announce.starts_with(TEST_TRACKER) {
         let port_str = &announce[TEST_TRACKER.len() + 1..];
         log::debug!("parsing {} into port for TestTrackerSelf", port_str);
@@ -65,7 +65,7 @@ fn create_tracker(announce: String) -> Box<dyn TrackerClient> {
     } else if announce.starts_with("udp") {
         Box::new(UdpTracker::new(&announce))
     } else {
-        panic!("Not sure what tracker to use for {}", announce);
+        panic!("Not sure what tracker to use for {announce}");
     }
 }
 
@@ -118,7 +118,7 @@ impl TrackerData {
                     .unwrap();
                 self.send_socket.send(&[1]).unwrap();
             }
-            Err(error) => panic!("Error while announcing to tracker: {:?}", error),
+            Err(error) => panic!("Error while announcing to tracker: {error:?}"),
         }
     }
 }

@@ -40,12 +40,12 @@ pub struct TrackerResponse {
 }
 
 #[repr(u8)]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub enum EventKind {
-    Started = 0,
+    Empty = 0,
     Completed,
+    Started,
     Stopped,
-    Empty,
 }
 
 impl ReadFrom for EventKind {
@@ -55,7 +55,7 @@ impl ReadFrom for EventKind {
         if buffer[0] > 3 {
             return Err(std::io::ErrorKind::InvalidData.into());
         }
-        let result: EventKind = unsafe { std::mem::transmute(buffer[0] as u8) };
+        let result: EventKind = unsafe { std::mem::transmute(buffer[0]) };
         Ok((result, length - 1))
     }
 }

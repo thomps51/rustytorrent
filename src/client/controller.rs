@@ -16,10 +16,11 @@ use std::{
     time::Duration,
 };
 
-const LISTENER: Token = Token(std::usize::MAX - 1); // Max is reserved by impl
+const TCP_LISTENER: Token = Token(std::usize::MAX - 1); // Max is reserved by impl
 const DISK_MESSAGE: Token = Token(std::usize::MAX - 2);
 const TRACKER_MESSAGE: Token = Token(std::usize::MAX - 3);
 const STOP_MESSAGE: Token = Token(std::usize::MAX - 4);
+const UTP_SOCKET: Token = Token(std::usize::MAX - 5);
 pub type CompletionHandler = Sender<bool>;
 
 #[derive(Debug, Clone)]
@@ -73,9 +74,19 @@ impl Controller {
         let tracker_message_socket_addr = tracker_message_socket.local_addr().unwrap();
         let mut stop_message_recv_socket = new_udp_socket();
         let stop_message_socket_addr = stop_message_recv_socket.local_addr().unwrap();
+        let mut utp_socket = UdpSocket::bind(
+            format!("0.0.0.0:{}", config.listen_port)
+                .as_str()
+                .parse()
+                .unwrap(),
+        )
+        .unwrap();
         let poll = Poll::new().unwrap();
         poll.registry()
-            .register(&mut listener, LISTENER, Interest::READABLE)
+            .register(&mut listener, TCP_LISTENER, Interest::READABLE)
+            .unwrap();
+        poll.registry()
+            .register(&mut utp_socket, UTP_SOCKET, Interest::READABLE)
             .unwrap();
         poll.registry()
             .register(&mut disk_message_socket, DISK_MESSAGE, Interest::READABLE)
@@ -144,6 +155,7 @@ impl Controller {
                 },
                 poll.clone(),
                 listener,
+                utp_socket,
                 tracker_request_sender.clone(),
             ),
             tracker_thread,
@@ -194,24 +206,35 @@ impl Controller {
                 }
                 DiskResponse::RequestCompleted {
                     info_hash,
-                    token,
+                    conn_id,
                     block,
                 } => {
-                    self.connection_manager.send_block(info_hash, token, block);
+                    self.connection_manager
+                        .send_block(info_hash, conn_id, block);
                 }
                 DiskResponse::WritePieceCompleted {
                     info_hash,
                     piece_index,
                     final_piece,
                 } => {
+                    debug!(
+                        "Write piece completed: piece_index: {}, final_piece: {}",
+                        piece_index, final_piece
+                    );
                     self.connection_manager.send_have(info_hash, piece_index);
                     if final_piece {
                         if let Some(handler) = self.completetion_handlers.get(&info_hash) {
                             handler.send(true).unwrap();
                         }
                     }
+                    // If all of the write pieces come back after we have exhausted our assigned blocks,
+                    // we need to make sure to continue updating
                 }
                 DiskResponse::Error { .. } => unimplemented!(),
+                DiskResponse::WritePieceFailedHash {
+                    info_hash: _,
+                    piece_index: _,
+                } => todo!(),
             }
             Self::clear_internal_message(&self.disk_message_socket);
         }
@@ -233,8 +256,8 @@ impl Controller {
     fn clear_internal_message(socket: &UdpSocket) {
         let mut buf = [0; 1];
         match socket.recv(&mut buf) {
-            Ok(_) => return,
-            Err(_) => return,
+            Ok(_) => (),
+            Err(_) => (),
         }
     }
 
@@ -247,15 +270,24 @@ impl Controller {
                 .poll(&mut events, Some(Duration::from_secs(1)))
                 .unwrap();
             for event in &events {
-                // if event is_writable, that means it is an outgoing connection that is now connected
+                // if event is_writable, that means it is an outgoing TCP connection that is now connected
                 if event.is_writable() {
-                    self.connection_manager.reregister_connected(event.token());
+                    let token = event.token();
+                    self.connection_manager.reregister_connected(token);
+                    if let Err(error) = self.connection_manager.handle_event_inner(token) {
+                        let addr = self.connection_manager.disconnect_peer(token, error);
+                        if let Some(_addr) = addr {
+                            // Try UDP connection
+                        }
+                    }
+                    continue;
                 }
                 match event.token() {
-                    LISTENER => self.connection_manager.accept_connections(),
+                    TCP_LISTENER => self.connection_manager.accept_connections(),
                     DISK_MESSAGE => self.handle_disk_message(),
                     TRACKER_MESSAGE => self.handle_tracker_message(),
                     STOP_MESSAGE => break 'outer,
+                    UTP_SOCKET => self.connection_manager.handle_utp_event(),
                     token => self.connection_manager.handle_event(token),
                 }
             }

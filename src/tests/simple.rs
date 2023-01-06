@@ -53,7 +53,7 @@ mod tests {
 
     #[test]
     fn one_seeder_one_downloader() {
-        let _lg = setup_env();
+        setup_env();
         use crate::common::{create_torrent::create_torrent_metadata_from_path, Torrent};
         use num_traits::pow;
         use std::sync::mpsc::channel;
@@ -104,7 +104,7 @@ mod tests {
                     listen_port: 6801,
                     max_peers: 50,
                     seed: false,
-                    print_output: false,
+                    print_output: true,
                 },
                 d_sender,
                 d_recv,

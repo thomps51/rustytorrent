@@ -80,7 +80,7 @@ impl BlockCache {
     }
 
     pub fn percent_done(&self) -> f64 {
-        return self.have_count as f64 * 100.0 / self.piece_info.total_pieces as f64;
+        self.have_count as f64 * 100.0 / self.piece_info.total_pieces as f64
     }
 
     pub fn write_block<T: Read>(&mut self, block: BlockReader<T>) -> Result<(), std::io::Error> {
@@ -138,7 +138,7 @@ impl BlockCache {
                 sent_blocks.negate();
             } else {
                 let mut have = self.get_block_have(*piece_index);
-                have.and(&sent_blocks);
+                have.and(sent_blocks);
                 for (block_index, value) in have.iter().enumerate() {
                     if value {
                         let begin = BLOCK_LENGTH * block_index;
@@ -171,6 +171,7 @@ impl BlockCache {
 pub struct PieceInFlight {
     pub index: usize,
     piece: Vec<u8>,
+    // piece: Vec<MaybeUninit<u8>>,
     pub have: BitVec,
     piece_info: PieceInfo,
     blocks_received: usize,
@@ -179,9 +180,10 @@ pub struct PieceInFlight {
 impl PieceInFlight {
     pub fn new(index: usize, piece_info: PieceInfo) -> PieceInFlight {
         let length = piece_info.get_piece_length(index);
+        // let mut piece = vec![MaybeUninit::uninit(); length];
         let mut piece = Vec::new();
         piece.reserve(length);
-        unsafe { piece.set_len(length) }
+        unsafe { piece.set_len(length) } // Bad, fix later.  This saves a fair amount of bit zeroing
         let num_blocks = piece_info.get_num_blocks(index);
         let have = BitVec::from_elem(num_blocks, false);
         PieceInFlight {
@@ -198,7 +200,7 @@ impl PieceInFlight {
         mut block: BlockReader<T>,
     ) -> Result<Option<CompletedPiece>, std::io::Error> {
         debug_assert!(block.piece_index() == self.index);
-        debug_assert!(self.piece.len() != 0);
+        debug_assert!(!self.piece.is_empty());
         if block.block_index() >= self.have.len() {
             return Err(std::io::Error::from(std::io::ErrorKind::InvalidData));
         }
@@ -213,6 +215,12 @@ impl PieceInFlight {
         }
         self.blocks_received += 1;
         let end = block.begin() + block.len();
+
+        // let mut buf = ReadBuf::uninit(&mut self.piece[block.begin()..end]);
+
+        // block
+        //     .read(&mut self.piece[block.begin()..end])
+        //     .expect("Reading from read buffer");
         block
             .read(&mut self.piece[block.begin()..end])
             .expect("Reading from read buffer");
@@ -221,7 +229,7 @@ impl PieceInFlight {
             debug!("Got piece {}", self.index);
             Ok(Some(CompletedPiece {
                 index: self.index,
-                piece: std::mem::replace(&mut self.piece, Vec::new()),
+                piece: std::mem::take(&mut self.piece),
             }))
         } else {
             Ok(None)

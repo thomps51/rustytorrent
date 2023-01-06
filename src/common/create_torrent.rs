@@ -30,7 +30,7 @@ pub fn create_torrent_metadata_from_path(
         if buffer.is_empty() {
             break;
         }
-        let hash = hash_to_bytes(&buffer);
+        let hash = hash_to_bytes(buffer);
         pieces.extend(hash);
         let length = buffer.len();
         file_length += length;

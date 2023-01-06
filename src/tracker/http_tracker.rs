@@ -73,7 +73,7 @@ impl TrackerClient for HttpTracker {
             bencoding::DataKind::Data(compact_peer_list) => {
                 // BEP23
                 let mut compact_peer_list: &[u8] = compact_peer_list;
-                while compact_peer_list.len() != 0 {
+                while !compact_peer_list.is_empty() {
                     let (ip, _) =
                         u32::read_from(&mut compact_peer_list, std::mem::size_of::<u32>())?;
                     let ip = Ipv4Addr::from(ip);
@@ -88,7 +88,7 @@ impl TrackerClient for HttpTracker {
         if let Some(raw_v6_addrs) = response_dict.get("peers6") {
             // BEP7
             let mut compact_peer_list = raw_v6_addrs.as_bytes().unwrap();
-            while compact_peer_list.len() != 0 {
+            while !compact_peer_list.is_empty() {
                 let (ip, _) = u128::read_from(&mut compact_peer_list, std::mem::size_of::<u128>())?;
                 let ip = Ipv6Addr::from(ip);
                 let (port, _) = u16::read_from(&mut compact_peer_list, std::mem::size_of::<u16>())?;
