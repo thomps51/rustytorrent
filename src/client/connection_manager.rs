@@ -599,7 +599,7 @@ impl ConnectionManager {
         if !self.config.print_output {
             return;
         }
-        for (_, torrent) in &self.torrents {
+        for torrent in self.torrents.values() {
             let now = std::time::Instant::now();
             if now - self.last_update > PRINT_UPDATE_TIME {
                 let download_rate = (self.downloaded as f64) / ((1 << 20) as f64);
@@ -635,10 +635,7 @@ impl ConnectionManager {
                     temp.push((k, v));
                 }
                 use std::io::prelude::*;
-                std::io::stdout()
-                    .flush()
-                    .ok()
-                    .expect("Could not flush stdout");
+                std::io::stdout().flush().expect("Could not flush stdout");
                 self.last_update = now;
             }
         }
@@ -651,18 +648,16 @@ impl ConnectionManager {
         let mut to_remove = Vec::new();
         if let Some(torrent) = self.torrents.get_mut(&info_hash) {
             torrent.have_on_disk.set(piece_index, true);
-            for (token, _) in &torrent.peers_data.token_to_info {
-                if let Some(connection) = self.connections.get_mut(token) {
-                    if let Connection::Established(peer) = connection {
-                        if peer.peer_has[piece_index] {
-                            continue;
-                        }
-                        if let Err(error) = peer.send(&Have {
-                            index: piece_index as u32,
-                        }) {
-                            info!("Disconnecting peer {}: {} while sending", token.0, error);
-                            to_remove.push((*token, error));
-                        }
+            for token in torrent.peers_data.token_to_info.keys() {
+                if let Some(Connection::Established(peer)) = self.connections.get_mut(token) {
+                    if peer.peer_has[piece_index] {
+                        continue;
+                    }
+                    if let Err(error) = peer.send(&Have {
+                        index: piece_index as u32,
+                    }) {
+                        info!("Disconnecting peer {}: {} while sending", token.0, error);
+                        to_remove.push((*token, error));
                     }
                 }
             }

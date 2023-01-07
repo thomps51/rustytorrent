@@ -135,7 +135,7 @@ impl Controller {
             Some(thread::spawn(move || {
                 let socket = new_udp_socket();
                 socket.connect(stop_message_socket_addr).unwrap();
-                if let Ok(_) = recv.recv() {
+                if recv.recv().is_ok() {
                     socket.send(&[1]).unwrap();
                 }
             }))
@@ -255,10 +255,7 @@ impl Controller {
 
     fn clear_internal_message(socket: &UdpSocket) {
         let mut buf = [0; 1];
-        match socket.recv(&mut buf) {
-            Ok(_) => (),
-            Err(_) => (),
-        }
+        let _ = socket.recv(&mut buf).unwrap();
     }
 
     pub fn run(mut self) {

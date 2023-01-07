@@ -160,7 +160,7 @@ impl BlockCache {
             sent_block_requests.remove(&index);
         }
         let mut result = 0;
-        for (_, sent_blocks) in sent_block_requests {
+        for sent_blocks in sent_block_requests.values_mut() {
             sent_blocks.iter().for_each(|x| result += x as usize);
         }
         (result, to_cancel)

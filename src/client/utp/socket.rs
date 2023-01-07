@@ -204,7 +204,7 @@ impl UtpSocket {
         self.seq_nr += 1;
         self.send_buffer.clear();
         header.write_to(&mut self.send_buffer)?;
-        self.send_buffer.write(buf)?;
+        self.send_buffer.write_all(buf)?;
         let sent = self.socket.send_to(&self.send_buffer, self.addr)?;
         self.send_buffer.clear();
         Ok(sent)

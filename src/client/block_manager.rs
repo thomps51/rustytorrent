@@ -58,7 +58,7 @@ impl BlockManager {
         }
         let piece_index = data.piece_index();
         // If write_block fails, that means the hash failed and we need to add it back to piece_assigner
-        if let Err(_) = self.block_cache.borrow_mut().write_block(data) {
+        if self.block_cache.borrow_mut().write_block(data).is_err() {
             self.piece_assigner.borrow_mut().add_piece(piece_index);
         }
         Ok(())
