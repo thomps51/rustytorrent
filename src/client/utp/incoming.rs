@@ -62,7 +62,7 @@ impl IncomingUtpConnection {
                 debug!("promoting incoming connection!");
                 let handshake_from_peer = Handshake::read_from(read_buffer)?;
                 let handshake_to_peer =
-                    Handshake::new(&self.peer_id, &handshake_from_peer.info_hash);
+                    Handshake::new(self.peer_id, &handshake_from_peer.info_hash);
                 handshake_to_peer.write_to(&mut self.send_buffer).unwrap();
                 self.socket.write_buf(&self.send_buffer).unwrap();
                 self.send_buffer.clear();

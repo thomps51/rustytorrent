@@ -49,7 +49,6 @@ impl Header {
         ack_nr: u16,
     ) -> Self {
         let type_ver_extension: u16 = ((type_ as u16) << 12) | (1 << 8);
-        println!("value: {type_ver_extension}");
         Header {
             type_ver_extension,
             connection_id,

@@ -70,9 +70,9 @@ impl OutgoingUtpConnection {
                 }
                 // Now send handshake, wait for handshake from peer
                 self.state = OutgoingUtpState::HandshakeSent;
-                // self.socket.send_header(UtpType::ST_DATA)?;
-                debug!("promoting outgoing connection!");
-                let handshake_to_peer = Handshake::new(&self.peer_id, &self.info_hash);
+                self.socket.ack_nr = header.seq_nr - 1; // Handshake ack_nr seems to be SEQ_NR - 1
+                debug!("Outgoing connection, sending handshake");
+                let handshake_to_peer = Handshake::new(self.peer_id, &self.info_hash);
                 handshake_to_peer.write_to(&mut self.send_buffer).unwrap();
                 self.socket.write_buf(&self.send_buffer).unwrap();
                 self.send_buffer.clear();
@@ -89,6 +89,7 @@ impl OutgoingUtpConnection {
                         std::io::ErrorKind::InvalidData.into(),
                     ));
                 }
+                debug!("Outgoing connnection, handshake Acked");
                 self.state = OutgoingUtpState::HandshakeAcked;
                 Ok(HandshakingUpdateSuccess::NoUpdate)
             }
@@ -97,6 +98,7 @@ impl OutgoingUtpConnection {
                 let handshake_from_peer = Handshake::read_from(read_buffer)?;
                 // may have more than just handshake data, including have info, unchoke, etc
                 // debug!("Got handshake from peer {}", self.token.0);
+                debug!("Outgoing utp got handshake from peer");
                 Ok(HandshakingUpdateSuccess::Complete(handshake_from_peer))
             }
         }

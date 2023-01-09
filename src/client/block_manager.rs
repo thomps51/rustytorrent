@@ -40,6 +40,7 @@ pub struct BlockManager {
     pub piece_assigner: SharedPieceAssigner,
     endgame_sent_blocks: HashMap<usize, BitVec>,
     pub block_cache: SharedBlockCache,
+    write_buffer: Vec<u8>,
 }
 
 impl BlockManager {
@@ -49,6 +50,7 @@ impl BlockManager {
             piece_assigner,
             endgame_sent_blocks: HashMap::new(),
             block_cache,
+            write_buffer: vec![],
         }
     }
     pub fn add_block<T: Read>(&mut self, data: BlockReader<T>) -> Result<(), std::io::Error> {
@@ -82,7 +84,7 @@ impl BlockManager {
             }
             self.blocks_in_flight = blocks_in_flight;
             for cancel in cancels {
-                cancel.write(stream)?;
+                cancel.write(&mut self.write_buffer)?;
             }
         }
         let mut piece_assigner = self.piece_assigner.borrow_mut();
@@ -99,11 +101,11 @@ impl BlockManager {
                 }
                 AssignedBlockResult::AssignedBlock { request } => {
                     debug!("Assigned block: {:?}", request);
-                    request.write(stream)?;
+                    request.write(&mut self.write_buffer)?;
                 }
                 AssignedBlockResult::EndgameAssignedBlock { request } => {
                     debug!("Endgame assigned block: {:?}", request);
-                    request.write(stream)?;
+                    request.write(&mut self.write_buffer)?;
                     self.endgame_sent_blocks
                         .entry(request.piece_index())
                         .or_insert(BitVec::from_elem(
@@ -119,10 +121,10 @@ impl BlockManager {
             sent += 1;
         }
         // Batch writes together since writing many small messages to sockets aren't efficient.
-        // if sent > 0 {
-        //     stream.write_all(&self.write_buffer)?;
-        //     self.write_buffer.clear();
-        // }
+        if sent > 0 {
+            stream.write(&self.write_buffer)?;
+            self.write_buffer.clear();
+        }
         Ok(sent)
     }
 

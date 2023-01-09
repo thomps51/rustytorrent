@@ -47,6 +47,7 @@ pub enum UpdateSuccess {
 
 #[derive(Debug)]
 pub enum UpdateError {
+    GeneralError(anyhow::Error),
     CommunicationError(std::io::Error),
     UnknownMessage { id: u8 },
     IndexOutOfBounds,
@@ -65,5 +66,11 @@ impl std::fmt::Display for UpdateError {
 impl From<std::io::Error> for UpdateError {
     fn from(error: std::io::Error) -> Self {
         UpdateError::CommunicationError(error)
+    }
+}
+
+impl From<anyhow::Error> for UpdateError {
+    fn from(error: anyhow::Error) -> Self {
+        UpdateError::GeneralError(error)
     }
 }

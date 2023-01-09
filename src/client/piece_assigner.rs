@@ -4,8 +4,6 @@ use std::time::Instant;
 
 use bit_vec::BitVec;
 use log::{debug, info};
-use rand::seq::SliceRandom;
-use rand::thread_rng;
 
 use super::piece_info::PieceInfo;
 use crate::messages::Request;
@@ -46,7 +44,9 @@ impl PieceAssigner {
         }
         info!("PieceAssigner: {} pieces to assign", pieces.len());
         pieces.shrink_to_fit();
-        pieces.shuffle(&mut thread_rng());
+        // use rand::seq::SliceRandom;
+        // use rand::thread_rng;
+        // pieces.shuffle(&mut thread_rng());
         Self {
             piece_info,
             pieces: pieces.into(),

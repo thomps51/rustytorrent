@@ -21,12 +21,12 @@ impl Handshake {
     pub const PSTR: &'static [u8] = "BitTorrent protocol".as_bytes();
     pub const SIZE: u8 = 49 + Self::PSTR.len() as u8;
 
-    pub fn new(peer_id: &[u8], info_hash: &Sha1Hash) -> Self {
-        let mut result: Self = Default::default();
-        result.info_hash = *info_hash;
-        result.peer_id.copy_from_slice(peer_id);
-        result.reserved = [0, 0, 0, 0, 0, 0, 0, 0];
-        result
+    pub fn new(peer_id: [u8; 20], info_hash: &Sha1Hash) -> Self {
+        Self {
+            reserved: [0, 0, 0, 0, 0, 0, 0, 0],
+            info_hash: *info_hash,
+            peer_id,
+        }
     }
 
     pub fn read_from<T: Read>(reader: &mut T) -> Result<Self, Error> {
@@ -69,7 +69,7 @@ fn verify_pstr<T: Read>(reader: &mut T) -> Result<(), Error> {
     }
     let mut buffer = [0; Handshake::PSTR.len()];
     reader.read_exact(&mut buffer)?;
-    if &buffer != Handshake::PSTR {
+    if buffer != Handshake::PSTR {
         info!(
             "Peer failed handshake: expected \"{:?}\" for PSTR, got \"{:?}\"",
             Handshake::PSTR,

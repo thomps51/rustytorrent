@@ -95,39 +95,39 @@ impl ReadBuffer {
         self.unused_start += num;
     }
 
-    // pub fn prepend_unread(&mut self, data: &[u8]) {
-    //     // TODO check math
-    //     if self.unread_start <= data.len() {
-    //         // Need to make room.  Ideally this doesn't happen often, because it can be expensive.
-    //         let room_in_front = self.unread_start - 1; // TODO check math
-    //         let room_in_back = self.capacity - self.unused_start; // TODO check math
+    pub fn prepend_unread(&mut self, data: &[u8]) {
+        // TODO check math
+        if self.unread_start <= data.len() {
+            // Need to make room.  Ideally this doesn't happen often, because it can be expensive.
+            let room_in_front = self.unread_start - 1; // TODO check math
+            let room_in_back = self.capacity - self.unused_start; // TODO check math
 
-    //         if room_in_front + room_in_back < data.len() {
-    //             let extra_space_needed = data.len() - room_in_front - room_in_back; // TODO check math
-    //             let mut new_buffer = Vec::with_capacity(self.capacity + extra_space_needed);
-    //             new_buffer.resize(self.capacity + extra_space_needed, 0);
-    //             let size = self.unread();
-    //             unsafe {
-    //                 let dst_ptr = new_buffer.as_mut_ptr().offset(data.len() as isize);
-    //                 let src_ptr = data.as_ptr().offset(self.unread_start as isize);
-    //                 std::ptr::copy_nonoverlapping(src_ptr, dst_ptr, size);
-    //             }
+            if room_in_front + room_in_back < data.len() {
+                let extra_space_needed = data.len() - room_in_front - room_in_back; // TODO check math
+                let mut new_buffer = Vec::with_capacity(self.capacity + extra_space_needed);
+                new_buffer.resize(self.capacity + extra_space_needed, 0);
+                let size = self.unread();
+                unsafe {
+                    let dst_ptr = new_buffer.as_mut_ptr().offset(data.len() as isize);
+                    let src_ptr = data.as_ptr().offset(self.unread_start as isize);
+                    std::ptr::copy_nonoverlapping(src_ptr, dst_ptr, size);
+                }
 
-    //             self.buffer = new_buffer;
-    //         } else {
-    //             let shift_amount = data.len() - room_in_front;
-    //             self.shift(shift_amount as isize);
-    //         }
-    //     }
+                self.buffer = new_buffer;
+            } else {
+                let shift_amount = data.len() - room_in_front;
+                self.shift(shift_amount as isize);
+            }
+        }
 
-    //     let start = self.unread_start - data.len(); // TODO verify this math
-    //     unsafe {
-    //         let dst_ptr = self.buffer.as_mut_ptr().offset(start as isize);
-    //         let src_ptr = data.as_ptr();
-    //         std::ptr::copy_nonoverlapping(src_ptr, dst_ptr, data.len());
-    //     }
-    //     self.unread_start = start;
-    // }
+        let start = self.unread_start - data.len(); // TODO verify this math
+        unsafe {
+            let dst_ptr = self.buffer.as_mut_ptr().offset(start as isize);
+            let src_ptr = data.as_ptr();
+            std::ptr::copy_nonoverlapping(src_ptr, dst_ptr, data.len());
+        }
+        self.unread_start = start;
+    }
 
     pub fn read_from<T: std::io::Read>(&mut self, reader: &mut T) -> Result<usize> {
         let read = reader.read(&mut self.buffer[self.unused_start..])?;

@@ -3,6 +3,7 @@
 #![feature(try_blocks)]
 #![feature(let_chains)]
 #![feature(read_buf)]
+#![allow(clippy::new_without_default)]
 pub mod bencoding;
 // pub use bencoding::*;
 

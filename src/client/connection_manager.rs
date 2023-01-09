@@ -541,11 +541,15 @@ impl ConnectionManager {
             );
             return;
         };
-        let free = self.config.max_peers - self.connections.len();
-        if free <= 0 || !torrent.peers_data.have_unconnected() {
+        let free = self.config.max_peers.saturating_sub(self.connections.len());
+        if free == 0 || !torrent.peers_data.have_unconnected() {
             return;
         }
-        let peer_list = torrent.peers_data.get_unconnected(free);
+        // let peer_list = torrent.peers_data.get_unconnected(free);
+        let peer_list = vec![PeerInfo {
+            addr: "127.0.0.1:1980".parse().unwrap(),
+            id: None,
+        }];
         for peer_info in peer_list {
             debug!("Attempting connection to peer: {:?}", peer_info);
             // have setting for trying UDP connection first

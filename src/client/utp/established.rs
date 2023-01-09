@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::io::{Write, Read, self};
+use std::io::{self, Read, Write};
 use std::sync::mpsc::Sender;
 
 use crate::client::disk_manager::{ConnectionIdentifier, DiskRequest};
@@ -15,6 +15,7 @@ use crate::{
         ProtocolMessage, Request, Unchoke,
     },
 };
+use anyhow::Context;
 use bit_vec::BitVec;
 use log::debug;
 use log::info;
@@ -39,14 +40,10 @@ pub struct EstablishedUtpConnection {
     pub downloaded: SharedCount,
     pub uploaded: SharedCount,
     disk_requester: Sender<DiskRequest>,
-    // For now, assume we only have one block in flight at a time.  In reality, messages
-    // can arrive out of order, so we have to worry about the case where we received a
-    // message that is actually for the next block, or is a different Bittorrent message
-    // altogether
     current_block: BlockInFlight,
-    // Whn we receive a seq_nr out of order, we
     next_sequence_number: u16,
     out_of_order: BTreeMap<u16, Vec<u8>>, // seq_nr to data
+    incomplete_message_buffer: Vec<u8>,
 }
 
 pub enum State {
@@ -56,51 +53,92 @@ pub enum State {
 }
 
 struct BlockInFlight {
-    index: usize,
-    begin: usize,
+    index: Option<usize>,
+    begin: Option<usize>,
     block: Vec<u8>,
+    length: usize,
+    active: bool,
 }
 
 impl BlockInFlight {
     fn new() -> Self {
-        Self { index: 0, begin: 0, block: Vec::with_capacity(BLOCK_LENGTH) }
+        Self {
+            index: None,
+            begin: None,
+            block: Vec::with_capacity(BLOCK_LENGTH),
+            length: BLOCK_LENGTH,
+            active: false,
+        }
     }
 
-    fn add(&mut self, reader: &mut impl Read, length: usize) -> bool {
-        let remaining = BLOCK_LENGTH - self.block.len();
+    fn add(&mut self, reader: &mut impl Read, mut length: usize) -> bool {
+        if let None = self.index {
+            let (index, remaining) = u32::read_from(reader, length).unwrap();
+            length = remaining;
+            self.index = Some(index as _);
+        }
+        if let None = self.begin {
+            let (begin, remaining) = u32::read_from(reader, length).unwrap();
+            length = remaining;
+            self.begin = Some(begin as _);
+        }
+        let remaining = self.length - self.block.len();
         let length = std::cmp::min(remaining, length);
         let current_block_length = self.block.len();
         // TODO: avoid overhead of zeroing vec since it doesn't matter
         let end = current_block_length + length;
         self.block.resize(end, 0);
         let target = &mut self.block.as_mut_slice()[current_block_length..end];
+        debug!(
+            "length: {}, end: {}, target_len: {}",
+            length,
+            end,
+            target.len()
+        );
         reader.read_exact(target).unwrap();
-        if self.block.len() == BLOCK_LENGTH {
+        if self.block.len() == self.length {
             return true;
         }
         false
     }
 
-    fn begin(&mut self, reader: &mut impl Read, length: usize) -> io::Result<bool> {
-            let (index, length) = u32::read_from(reader, length)?;
-            let (begin, length) = u32::read_from(reader, length)?;
-            self.set_info(index as _, begin as _);
-            Ok(self.add(reader, length))
+    fn begin(
+        &mut self,
+        reader: &mut impl Read,
+        message_length: usize,
+        first_packet_length: usize,
+    ) -> io::Result<bool> {
+        self.reset();
+        self.active = true;
+        self.length = message_length - 8;
+        // index and begin won't necessarily be included in this packet. If they are not, they will be in the next one
+        if first_packet_length < 4 {
+            self.index = None;
+            return Ok(false);
+        }
+        let (index, length) = u32::read_from(reader, first_packet_length).unwrap();
+        self.index = Some(index as _);
+        if first_packet_length < 8 {
+            self.begin = None;
+            return Ok(false);
+        }
+        let (begin, length) = u32::read_from(reader, length).unwrap();
+        self.begin = Some(begin as _);
+        debug!("Setting BlockInFlight index: {}, begin: {}", index, begin);
+        debug!("Remaining data length: {}", length);
+        Ok(self.add(reader, length))
     }
 
     fn active(&self) -> bool {
-        !self.block.is_empty()
-    }
-
-    fn set_info(&mut self, index: usize, begin: usize) {
-        self.index = index;
-        self.begin = begin;
-        self.reset();
+        self.active
     }
 
     fn reset(&mut self) {
         // We do this so we can reuse this
         self.block.clear();
+        self.active = false;
+        self.index = None;
+        self.begin = None;
     }
 }
 
@@ -116,7 +154,7 @@ impl EstablishedUtpConnection {
         downloaded: SharedCount,
         uploaded: SharedCount,
     ) -> Self {
-        let next_sequence_number = stream.seq_nr;
+        let next_sequence_number = stream.ack_nr;
         Self {
             info_hash,
             am_choking: true,
@@ -137,6 +175,7 @@ impl EstablishedUtpConnection {
             current_block: BlockInFlight::new(),
             next_sequence_number,
             out_of_order: BTreeMap::new(),
+            incomplete_message_buffer: vec![],
         }
     }
 
@@ -160,10 +199,11 @@ impl EstablishedUtpConnection {
         self.next_sequence_number = next_sequence_number;
         loop {
             let retval = self.read(read_buffer, header)?;
+            debug!("Remaining read buffer size: {}", read_buffer.unread());
             if read_buffer.unread() == 0 {
                 loop {
                     // TODO: Write tests that actually test this logic
-                    if let Some((ooo_seq_nr, ooo_data)) = self.out_of_order.first_key_value() 
+                    if let Some((ooo_seq_nr, ooo_data)) = self.out_of_order.first_key_value()
                         && *ooo_seq_nr == self.next_sequence_number
                     {
                         read_buffer.write_all(ooo_data)?;
@@ -173,8 +213,9 @@ impl EstablishedUtpConnection {
                         break;
                     }
                 }
-            } else {
-                break;
+                if read_buffer.unread() == 0 {
+                    break;
+                }
             }
             match retval {
                 UpdateSuccess::NoUpdate => {
@@ -206,40 +247,71 @@ impl EstablishedUtpConnection {
     }
 
     fn read(&mut self, read_buffer: &mut ReadBuffer, _header: &Header) -> UpdateResult {
-        // If we are in the middle of a block, we will be getting packets with an ST_DATA header and
-        // a chunk of data, with no length prefix.
-
-        // I need to know if the header was ST_DATA here, or make it so only ST_DATA packets get here
+        if !self.incomplete_message_buffer.is_empty() {
+            read_buffer.prepend_unread(self.incomplete_message_buffer.as_slice());
+            self.incomplete_message_buffer.clear();
+        }
+        let packet_data_length = read_buffer.unread();
+        if packet_data_length == 0 {
+            return Ok(UpdateSuccess::NoUpdate);
+        }
+        debug!("read(): active: {}", self.current_block.active());
         if self.current_block.active() {
-            let length = read_buffer.unread();
-            if self.current_block.add(read_buffer, length) {
-                    Block::read_and_update_utp(&mut &*self.current_block.block,  &mut self.block_manager, self.current_block.block.len())?;
-                    self.current_block.reset();
-            } else {
-                return Ok(UpdateSuccess::Transferred {
-                                    downloaded: length,
-                                    uploaded: 0,
-                });
+            if self.current_block.add(read_buffer, packet_data_length) {
+                Block::read_and_update_utp(
+                    &mut &*self.current_block.block,
+                    &mut self.block_manager,
+                    self.current_block.index.unwrap(),
+                    self.current_block.begin.unwrap(),
+                    self.current_block.length,
+                )?;
+                self.current_block.reset();
             }
             return Ok(UpdateSuccess::Transferred {
-                downloaded: length,
+                downloaded: packet_data_length,
                 uploaded: 0,
             });
         }
-
         const LENGTH_BYTE_SIZE: usize = 4;
-        let (length, _) = u32::read_from(read_buffer, LENGTH_BYTE_SIZE)?;
+        if read_buffer.unread() < LENGTH_BYTE_SIZE + ID_BYTE_SIZE {
+            debug!("Incomplete message, not enough for length and id");
+            read_buffer.read_to_end(&mut self.incomplete_message_buffer)?;
+            return Ok(UpdateSuccess::NoUpdate);
+        }
+        let (length, _) =
+            u32::read_from(read_buffer, LENGTH_BYTE_SIZE).context("Reading message length")?;
         let length = length as usize;
         if length == 0 {
             self.received_keep_alive();
             return Ok(UpdateSuccess::Success);
         }
         let total_read = LENGTH_BYTE_SIZE + length;
-        let id = read_byte(read_buffer)?;
-        let length = length - 1; // subtract ID byte
+        const ID_BYTE_SIZE: usize = 1;
+        let id = read_byte(read_buffer).context("Reading message ID")?;
+        let length = length - ID_BYTE_SIZE;
+        let packet_data_length = packet_data_length - LENGTH_BYTE_SIZE - ID_BYTE_SIZE;
         let mut update_block = || -> UpdateResult {
-            if self.current_block.begin(read_buffer, length)? {
-                Block::read_and_update_utp(&mut &*self.current_block.block,  &mut self.block_manager, self.current_block.block.len())?;
+            debug!("update_block");
+            if read_buffer.unread() < 8 {
+                debug!("incompleete block");
+                self.current_block.reset();
+                self.current_block.active = true;
+                self.current_block.length = length - 8;
+                read_buffer.read_to_end(&mut self.incomplete_message_buffer)?;
+                return Ok(UpdateSuccess::NoUpdate);
+            }
+            if self
+                .current_block
+                .begin(read_buffer, length, packet_data_length)
+                .context("Beginning block")?
+            {
+                Block::read_and_update_utp(
+                    &mut &*self.current_block.block,
+                    &mut self.block_manager,
+                    self.current_block.index.unwrap(),
+                    self.current_block.begin.unwrap(),
+                    self.current_block.length,
+                )?;
                 self.current_block.reset();
             }
             Ok(UpdateSuccess::Success)
@@ -251,8 +323,11 @@ impl EstablishedUtpConnection {
                         update_block()
                     },
                     $($A::ID => {
-                        let ($msg, length) = $A::read_from(read_buffer, length)?;
-                        assert_eq!(length, 0);
+                        use write_to::Name;
+                        debug!("Reading {} message", $A::NAME);
+                        let ($msg, length) = $A::read_from(read_buffer, length).context("Reading message")?;
+                        debug!("Received {:?}", $msg);
+                        assert_eq!(length, 0); // Not necessarily true in UTP?
                         $B;
                         Ok(UpdateSuccess::Success)
                     })*
@@ -325,7 +400,7 @@ impl EstablishedUtpConnection {
     fn send_block_requests(&mut self) -> UpdateResult {
         if !self.peer_choking {
             debug!("Peer is not choking");
-            let sent = self.block_manager.send_block_requests_utp(
+            let sent = self.block_manager.send_block_requests(
                 &mut self.stream,
                 &self.peer_has,
                 self.id,
@@ -344,9 +419,14 @@ impl EstablishedUtpConnection {
 
 impl EstablishedUtpConnection {
     pub fn update(&mut self, read_buffer: &mut ReadBuffer, header: &Header) -> UpdateResult {
-        // If header is ST_STATE, we don't need to process it.
         if header.get_type() == Type::StState {
+            // ACK
             return Ok(UpdateSuccess::NoUpdate);
+        }
+        if header.get_type() != Type::StData {
+            return Err(UpdateError::CommunicationError(
+                std::io::ErrorKind::InvalidData.into(),
+            ));
         }
         self.stream.process_header(header);
         // TODO: maybe ACK only completed blocks?
@@ -357,25 +437,12 @@ impl EstablishedUtpConnection {
                 log::debug!("EstablishedUtpConnection update read error: {:?}", error);
                 read_buffer.clear();
                 UpdateSuccess::NoUpdate
-                // if header.get_type() == Type::StState {
-                //     // TODO handle this better, find out what to do with bits in buffer
-                //     UpdateSuccess::NoUpdate
-                // } else {
-                //     UpdateSuccess::NoUpdate
-                //     // return Err(error);
-                // }
             }
         };
 
         match self.state {
             State::Seeding => Ok(read_result),
             State::ConnectedNormal | State::ConnectedEndgame => {
-                // Cancel requested Requests (TODO)
-                // if self.block_manager.piece_assigner.borrow().is_endgame() {
-                //     debug!("Transition to endgame");
-                //     self.state = State::ConnectedEndgame;
-                //     return Ok(read_result);
-                // }
                 if self.block_manager.block_cache.borrow().done() {
                     self.state = State::Seeding;
                     return Ok(read_result);

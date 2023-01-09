@@ -53,7 +53,7 @@ impl ConnectionBase for HandshakingConnection {
                 // Assumes update has been called because Poll indicated that this socket is now
                 // connected, or that connection has failed
                 use crate::messages;
-                let handshake_to_peer = messages::Handshake::new(&self.peer_id, &info_hash);
+                let handshake_to_peer = messages::Handshake::new(self.peer_id, &info_hash);
                 handshake_to_peer.write_to(&mut self.stream)?;
                 self.state = HandshakingState::Reading;
                 debug!("Finished writing handshake");
@@ -71,7 +71,7 @@ impl ConnectionBase for HandshakingConnection {
                 debug!("Got handshake from peer {}", self.token.0);
                 if let Type::Incoming = self.conn_type {
                     let handshake_to_peer =
-                        Handshake::new(&self.peer_id, &handshake_from_peer.info_hash);
+                        Handshake::new(self.peer_id, &handshake_from_peer.info_hash);
                     handshake_to_peer.write_to(&mut self.stream)?;
                 }
                 self.state = HandshakingState::Done;

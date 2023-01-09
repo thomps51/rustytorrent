@@ -18,7 +18,7 @@ pub struct UtpSocket {
     socket: Rc<UdpSocket>,
     addr: SocketAddr,
     pub seq_nr: u16,
-    ack_nr: u16,
+    pub ack_nr: u16,
     conn_id_recv: u16,
     conn_id_send: u16,
     wnd_size: u32,
@@ -54,33 +54,34 @@ pub struct UtpSocket {
 //     }
 // }
 
-// impl Write for UtpSocket {
-//     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-//         log::debug!("UtpSocket::Write");
-//         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-//         let ms = now.as_micros();
-//         let header = Header {
-//             type_ver_extension: (1 >> 4) | Type::ST_SYN as u16,
-//             connection_id: self.conn_id_send,
-//             timestamp_microseconds: ms as _,
-//             timestamp_difference_microseconds: self.prev_timestamp_diff,
-//             wnd_size: self.wnd_size,
-//             seq_nr: self.seq_nr,
-//             ack_nr: self.ack_nr,
-//         };
-//         self.seq_nr += 1;
-//         self.send_buffer.clear();
-//         header.write_to(&mut self.send_buffer)?;
-//         self.send_buffer.write(&buf)?;
-//         let sent = self.socket.send_to(&self.send_buffer, self.addr)?;
-//         self.send_buffer.clear();
-//         Ok(sent)
-//     }
+impl Write for UtpSocket {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        log::debug!("UtpSocket::Write");
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+        let ms = now.as_micros();
+        let header = Header::new(
+            Type::StData,
+            self.conn_id_send,
+            ms as _,
+            self.prev_timestamp_diff,
+            self.wnd_size,
+            self.seq_nr,
+            self.ack_nr,
+        );
+        log::debug!("write_buf header: {:?}", header);
+        self.seq_nr += 1;
+        self.send_buffer.clear();
+        header.write_to(&mut self.send_buffer)?;
+        self.send_buffer.write_all(buf)?;
+        let sent = self.socket.send_to(&self.send_buffer, self.addr)?;
+        self.send_buffer.clear();
+        Ok(sent.saturating_sub(20))
+    }
 
-//     fn flush(&mut self) -> std::io::Result<()> {
-//         Ok(())
-//     }
-// }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
 
 impl UtpSocket {
     pub fn new(socket: Rc<UdpSocket>, addr: SocketAddr) -> Self {
@@ -188,7 +189,6 @@ impl UtpSocket {
     }
 
     pub fn write_buf(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        log::debug!("UtpSocket::Write");
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
         let ms = now.as_micros();
         let header = Header::new(
@@ -200,7 +200,11 @@ impl UtpSocket {
             self.seq_nr,
             self.ack_nr,
         );
-        log::debug!("write_buf header: {:?}", header);
+        log::debug!(
+            "write_buf sending {} bytes with header: {:?}",
+            buf.len(),
+            header
+        );
         self.seq_nr += 1;
         self.send_buffer.clear();
         header.write_to(&mut self.send_buffer)?;
