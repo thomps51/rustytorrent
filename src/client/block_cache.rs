@@ -181,9 +181,10 @@ impl PieceInFlight {
     pub fn new(index: usize, piece_info: PieceInfo) -> PieceInFlight {
         let length = piece_info.get_piece_length(index);
         // let mut piece = vec![MaybeUninit::uninit(); length];
-        let mut piece = Vec::new();
-        piece.reserve(length);
-        unsafe { piece.set_len(length) } // Bad, fix later.  This saves a fair amount of bit zeroing
+        let piece = vec![0; length];
+        // let mut piece = Vec::new();
+        // piece.reserve(length);
+        // unsafe { piece.set_len(length) } // Bad, fix later.  This saves a fair amount of bit zeroing
         let num_blocks = piece_info.get_num_blocks(index);
         let have = BitVec::from_elem(num_blocks, false);
         PieceInFlight {

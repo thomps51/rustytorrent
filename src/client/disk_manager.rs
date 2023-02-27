@@ -26,7 +26,7 @@ pub type AllocatedFiles = HashMap<PathBuf, fs::File>;
 #[derive(Debug, Clone, Copy)]
 pub enum ConnectionIdentifier {
     TcpToken(Token),
-    UtpId(SocketAddr),
+    UtpId(SocketAddr, u16),
 }
 
 // Going to separate Read and Write disk IO threads for now, may combine later.

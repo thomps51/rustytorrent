@@ -26,6 +26,7 @@ tempfile = "3.3.0"
 chrono = "0.4.19"
 env_logger = "0.9.0"
 rccell = "0.1.3"
+libc = "0.2.139"
 write_to = { path = "../write_to" }
 
 [profile.release]

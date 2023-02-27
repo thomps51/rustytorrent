@@ -15,7 +15,7 @@ pub enum OutgoingUtpState {
 }
 
 pub struct OutgoingUtpConnection {
-    socket: UtpSocket,
+    pub socket: UtpSocket,
     state: OutgoingUtpState,
     info_hash: Sha1Hash,
     peer_id: [u8; PEER_ID_LENGTH],

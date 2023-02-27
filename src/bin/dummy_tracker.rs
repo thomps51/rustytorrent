@@ -107,8 +107,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     //     .register(&mut socket, token, Interest::READABLE)
     //     .unwrap();
     // let mut events = Events::with_capacity(10);
-    let mut buffer = Vec::with_capacity(65000);
-    buffer.resize(65000, 0);
+    let mut buffer = vec![0; 65000];
 
     loop {
         println!("Polling");

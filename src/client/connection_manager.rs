@@ -52,7 +52,7 @@ pub struct ConnectionManager {
     read_buffer: ReadBuffer,
     poll: RcCell<Poll>,
     utp_socket: Rc<UdpSocket>,
-    utp_connections: HashMap<SocketAddr, UtpConnection>,
+    utp_connections: HashMap<(SocketAddr, u16), UtpConnection>,
 }
 
 pub struct ConnectionManagerConfig {
@@ -322,13 +322,21 @@ impl ConnectionManager {
                 self.read_buffer.get_unread()
             );
         }
-        // TODO: the key is not really Addr, it is connection id.
-        let event = match self.utp_connections.entry(addr).or_insert_with(|| {
-            UtpConnection::Incoming(IncomingUtpConnection::new(
-                UtpSocket::new_from_incoming(self.utp_socket.clone(), addr, &header),
-                self.peer_id,
-            ))
-        }) {
+        // If connection id is not in connections, add one to it when we insert it per the spec
+        let connection_id = header.connection_id;
+        let connection = match self.utp_connections.entry((addr, connection_id)) {
+            std::collections::hash_map::Entry::Occupied(v) => v.into_mut(),
+            std::collections::hash_map::Entry::Vacant(_) => self
+                .utp_connections
+                .entry((addr, connection_id + 1))
+                .or_insert_with(|| {
+                    UtpConnection::Incoming(IncomingUtpConnection::new(
+                        UtpSocket::new_from_incoming(self.utp_socket.clone(), addr, &header),
+                        self.peer_id,
+                    ))
+                }),
+        };
+        let event = match connection {
             UtpConnection::Incoming(conn) => {
                 // assert_eq!(0, remaining); // Expecting only headers
                 if let HandshakingUpdateSuccess::Complete(handshake) =
@@ -379,7 +387,7 @@ impl ConnectionManager {
                         std::io::ErrorKind::AlreadyExists.into(),
                     ));
                 }
-                let peer = self.utp_connections.remove(&addr).unwrap();
+                let peer = self.utp_connections.remove(&(addr, connection_id)).unwrap();
                 let socket = peer.promote();
                 self.addr_to_info_hash.insert(addr, handshake.info_hash);
                 // torrent_data // TODO figure out if I need to do this
@@ -405,7 +413,7 @@ impl ConnectionManager {
                 // Call update in case we have more data with the handshake
                 promoted.update(&mut self.read_buffer, &header)?;
                 self.utp_connections
-                    .insert(addr, UtpConnection::Established(promoted));
+                    .insert((addr, connection_id), UtpConnection::Established(promoted));
             }
         }
         Ok(())
@@ -582,19 +590,23 @@ impl ConnectionManager {
                     .insert(token, Connection::Handshaking(peer));
             } else {
                 // Utp connection
-                let peer = match OutgoingUtpConnection::new(
+                let (peer, connection_id) = match OutgoingUtpConnection::new(
                     UtpSocket::new(self.utp_socket.clone(), peer_info.addr),
                     torrent.info_hash,
                     self.peer_id,
                 ) {
-                    Ok(peer) => UtpConnection::Outgoing(peer),
+                    Ok(peer) => {
+                        let connection_id = peer.socket.conn_id_recv;
+                        (UtpConnection::Outgoing(peer), connection_id)
+                    }
                     Err(error) => {
                         warn!("Failed to connect to peer: {:?}", error);
                         continue;
                     }
                 };
                 // TODO torrent.peers_data.connected(token, peer_info.clone());
-                self.utp_connections.insert(peer_info.addr, peer);
+                self.utp_connections
+                    .insert((peer_info.addr, connection_id), peer);
             }
         }
     }
@@ -692,9 +704,9 @@ impl ConnectionManager {
                 };
                 self.disconnect_peer(token, error.into());
             }
-            ConnectionIdentifier::UtpId(addr) => {
+            ConnectionIdentifier::UtpId(addr, conn_id) => {
                 let error = if let Some(UtpConnection::Established(conn)) =
-                    self.utp_connections.get_mut(&addr)
+                    self.utp_connections.get_mut(&(addr, conn_id))
                 {
                     if let Err(error) = conn.send(&block) {
                         error
@@ -705,7 +717,7 @@ impl ConnectionManager {
                     return;
                 };
                 warn!("Error from sending UTP block: {:?}", error);
-                // "disconnect" UTP peer?
+                // "disconnect" UTP peer? Send FIN
             }
         }
     }

@@ -25,3 +25,7 @@ pub type SharedCount = Rc<RefCell<usize>>;
 pub fn new_udp_socket() -> UdpSocket {
     UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap()
 }
+
+pub fn new_udp_socket_ipv6() -> UdpSocket {
+    UdpSocket::bind("[::1]:0".parse().unwrap()).unwrap()
+}

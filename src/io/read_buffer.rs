@@ -104,15 +104,13 @@ impl ReadBuffer {
 
             if room_in_front + room_in_back < data.len() {
                 let extra_space_needed = data.len() - room_in_front - room_in_back; // TODO check math
-                let mut new_buffer = Vec::with_capacity(self.capacity + extra_space_needed);
-                new_buffer.resize(self.capacity + extra_space_needed, 0);
+                let mut new_buffer = vec![0; self.capacity + extra_space_needed];
                 let size = self.unread();
                 unsafe {
-                    let dst_ptr = new_buffer.as_mut_ptr().offset(data.len() as isize);
-                    let src_ptr = data.as_ptr().offset(self.unread_start as isize);
+                    let dst_ptr = new_buffer.as_mut_ptr().add(data.len());
+                    let src_ptr = data.as_ptr().add(self.unread_start);
                     std::ptr::copy_nonoverlapping(src_ptr, dst_ptr, size);
                 }
-
                 self.buffer = new_buffer;
             } else {
                 let shift_amount = data.len() - room_in_front;
@@ -122,7 +120,7 @@ impl ReadBuffer {
 
         let start = self.unread_start - data.len(); // TODO verify this math
         unsafe {
-            let dst_ptr = self.buffer.as_mut_ptr().offset(start as isize);
+            let dst_ptr = self.buffer.as_mut_ptr().add(start);
             let src_ptr = data.as_ptr();
             std::ptr::copy_nonoverlapping(src_ptr, dst_ptr, data.len());
         }

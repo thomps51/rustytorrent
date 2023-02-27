@@ -72,12 +72,12 @@ impl BlockInFlight {
     }
 
     fn add(&mut self, reader: &mut impl Read, mut length: usize) -> bool {
-        if let None = self.index {
+        if self.index.is_none() {
             let (index, remaining) = u32::read_from(reader, length).unwrap();
             length = remaining;
             self.index = Some(index as _);
         }
-        if let None = self.begin {
+        if self.begin.is_none() {
             let (begin, remaining) = u32::read_from(reader, length).unwrap();
             length = remaining;
             self.begin = Some(begin as _);
@@ -112,16 +112,9 @@ impl BlockInFlight {
         self.active = true;
         self.length = message_length - 8;
         // index and begin won't necessarily be included in this packet. If they are not, they will be in the next one
-        if first_packet_length < 4 {
-            self.index = None;
-            return Ok(false);
-        }
+        // If this function is called, then we know we have index and begin
         let (index, length) = u32::read_from(reader, first_packet_length).unwrap();
         self.index = Some(index as _);
-        if first_packet_length < 8 {
-            self.begin = None;
-            return Ok(false);
-        }
         let (begin, length) = u32::read_from(reader, length).unwrap();
         self.begin = Some(begin as _);
         debug!("Setting BlockInFlight index: {}, begin: {}", index, begin);
@@ -134,7 +127,6 @@ impl BlockInFlight {
     }
 
     fn reset(&mut self) {
-        // We do this so we can reuse this
         self.block.clear();
         self.active = false;
         self.index = None;
@@ -255,7 +247,6 @@ impl EstablishedUtpConnection {
         if packet_data_length == 0 {
             return Ok(UpdateSuccess::NoUpdate);
         }
-        debug!("read(): active: {}", self.current_block.active());
         if self.current_block.active() {
             if self.current_block.add(read_buffer, packet_data_length) {
                 Block::read_and_update_utp(
@@ -327,7 +318,7 @@ impl EstablishedUtpConnection {
                         debug!("Reading {} message", $A::NAME);
                         let ($msg, length) = $A::read_from(read_buffer, length).context("Reading message")?;
                         debug!("Received {:?}", $msg);
-                        assert_eq!(length, 0); // Not necessarily true in UTP?
+                        assert_eq!(length, 0); // Not necessarily true in UTP? Only seems to happen with Blocks?
                         $B;
                         Ok(UpdateSuccess::Success)
                     })*
@@ -391,7 +382,7 @@ impl EstablishedUtpConnection {
         self.disk_requester
             .send(DiskRequest::Request {
                 info_hash: self.info_hash,
-                conn_id: ConnectionIdentifier::UtpId(self.stream.addr()),
+                conn_id: ConnectionIdentifier::UtpId(self.stream.addr(), self.stream.conn_id_recv),
                 request,
             })
             .unwrap();

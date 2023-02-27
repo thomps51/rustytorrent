@@ -19,7 +19,7 @@ pub struct UtpSocket {
     addr: SocketAddr,
     pub seq_nr: u16,
     pub ack_nr: u16,
-    conn_id_recv: u16,
+    pub conn_id_recv: u16,
     conn_id_send: u16,
     wnd_size: u32,
     send_buffer: Vec<u8>,
@@ -215,6 +215,7 @@ impl UtpSocket {
     }
 
     pub fn write<T: ProtocolMessage>(&mut self, msg: &T) -> std::io::Result<usize> {
+        // TODO: Chunk up message into multiple packets if above a certain size (600-800 bytes?)
         log::debug!("UtpSocket::Write");
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
         let ms = now.as_micros();
@@ -236,62 +237,4 @@ impl UtpSocket {
         self.send_buffer.clear();
         Ok(sent)
     }
-
-    // pub fn recv_syn_response(&mut self, recv_buffer: &mut ReadBuffer) -> io::Result<bool> {
-    //     assert_eq!(0, recv_buffer.unread());
-    //     assert!(20 <= recv_buffer.unused());
-    //     let buffer = recv_buffer.get_unused_mut();
-    //     let read = match self.socket.recv(buffer) {
-    //         Ok(read) => read,
-    //         Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return Ok(false),
-    //         Err(error) => return Err(error),
-    //     };
-    //     recv_buffer.added_unused(read);
-    //     if read != Header::SIZE {
-    //         return Err(io::ErrorKind::InvalidData.into());
-    //     }
-    //     let (header, _) = Header::read_from(recv_buffer, read)?;
-    //     self.process_header(&header);
-    //     Ok(true)
-    // }
-
-    // pub fn recv_header(&mut self, recv_buffer: &mut ReadBuffer) -> io::Result<Option<Type>> {
-    //     assert_eq!(0, recv_buffer.unread());
-    //     assert!(20 <= recv_buffer.unused());
-    //     let buffer = recv_buffer.get_unused_mut();
-    //     let read = match self.socket.recv(buffer) {
-    //         Ok(read) => read,
-    //         Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return Ok(None),
-    //         Err(error) => return Err(error),
-    //     };
-    //     recv_buffer.added_unused(read);
-    //     if read != Header::SIZE {
-    //         log::warn!("Received utp header of unexpected size: {:?}", read);
-    //         return Err(io::ErrorKind::InvalidData.into());
-    //     }
-    //     let (header, _) = Header::read_from(recv_buffer, read)?;
-    //     self.process_header(&header);
-    //     Ok(Some(header.get_type()))
-    // }
-
-    // pub fn send<T: WriteTo>(&mut self, message: &T) -> io::Result<()> {
-    //     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-    //     let ms = now.as_micros();
-    //     let header = Header {
-    //         type_ver_extension: (1 >> 4) | Type::ST_SYN as u16,
-    //         connection_id: self.conn_id_send,
-    //         timestamp_microseconds: ms as _,
-    //         timestamp_difference_microseconds: self.prev_timestamp_diff,
-    //         wnd_size: self.wnd_size,
-    //         seq_nr: self.seq_nr,
-    //         ack_nr: self.ack_nr,
-    //     };
-    //     self.seq_nr += 1;
-    //     self.send_buffer.clear();
-    //     header.write_to(&mut self.send_buffer)?;
-    //     message.write_to(&mut self.send_buffer)?;
-    //     let _sent = self.socket.send(&self.send_buffer)?;
-    //     self.send_buffer.clear();
-    //     Ok(())
-    // }
 }

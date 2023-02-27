@@ -122,7 +122,7 @@ impl BlockManager {
         }
         // Batch writes together since writing many small messages to sockets aren't efficient.
         if sent > 0 {
-            stream.write(&self.write_buffer)?;
+            stream.write_all(&self.write_buffer)?;
             self.write_buffer.clear();
         }
         Ok(sent)
