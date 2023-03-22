@@ -5,7 +5,9 @@ use std::os::fd::AsRawFd;
 
 use mio::net::UdpSocket;
 
-use super::ReadBuffer;
+use crate::io::raw_to_socketaddr;
+
+use super::{msghdr_x, ReadBuffer};
 
 // Receive multiple udp packets with a single system call.
 #[cfg(target_os = "macos")]
@@ -20,7 +22,7 @@ pub fn recvmmsg<const N: usize>(
     // SYS_RECVMSG_X def:
     // https://go.googlesource.com/sys/+/refs/heads/release-branch.go1.11/unix/zsysnum_darwin_386.go
     const SYS_RECVMSG_X: usize = 480;
-    let mut syscall_data = msghdr_x_helper::new(recv_buffer);
+    let mut syscall_data = msghdr_x_recv_helper::new(recv_buffer);
     let num_packets_received = unsafe {
         libc::syscall(
             SYS_RECVMSG_X as _,
@@ -33,56 +35,12 @@ pub fn recvmmsg<const N: usize>(
     if num_packets_received < 0 {
         return Err(std::io::Error::last_os_error());
     }
-    let result_addr = syscall_data.finalize(recv_buffer, num_packets_received as _);
+    let result_addr = syscall_data.finalize(recv_buffer, num_packets_received as _)?;
     Ok((num_packets_received as _, result_addr))
 }
 
-/*
-This is the actual C struct used by the SYS_RECVMSG_X syscall.
-
-struct msghdr_x {
-    void            *msg_name;      /* optional address */
-    socklen_t       msg_namelen;    /* size of address */
-    struct iovec    *msg_iov;       /* scatter/gather array */
-    int             msg_iovlen;     /* # elements in msg_iov */
-    void            *msg_control;   /* ancillary data, see below */
-    socklen_t       msg_controllen; /* ancillary data buffer len */
-    int             msg_flags;      /* flags on received message */
-    size_t          msg_datalen;    /* byte length of buffer in msg_iov */
-};
-*/
-
-// This is the raw data that is passed to the recvmsg_x syscall.
-#[repr(C)]
-#[derive(Copy, Clone)]
-struct msghdr_x {
-    msg_name: *mut libc::c_void,
-    msg_namelen: libc::socklen_t,
-    msg_iov: *mut libc::iovec,
-    msg_iovlen: i32,
-    msg_control: *mut libc::c_void,
-    msg_controllen: libc::socklen_t,
-    msg_flags: i32,
-    msg_datalen: libc::size_t,
-}
-
-impl Default for msghdr_x {
-    fn default() -> Self {
-        Self {
-            msg_name: std::ptr::null_mut(),
-            msg_namelen: Default::default(),
-            msg_iov: std::ptr::null_mut(),
-            msg_iovlen: Default::default(),
-            msg_control: std::ptr::null_mut(),
-            msg_controllen: Default::default(),
-            msg_flags: Default::default(),
-            msg_datalen: Default::default(),
-        }
-    }
-}
-
 #[allow(non_camel_case_types)]
-struct msghdr_x_helper<const N: usize> {
+struct msghdr_x_recv_helper<const N: usize> {
     inner: [msghdr_x; N],
     // These are never read, but need to live as long as inner because inner contains
     // mutable pointers to the data in both.
@@ -92,7 +50,7 @@ struct msghdr_x_helper<const N: usize> {
     src_addrs: [[u8; std::mem::size_of::<libc::sockaddr_in6>()]; N],
 }
 
-impl<const N: usize> msghdr_x_helper<N> {
+impl<const N: usize> msghdr_x_recv_helper<N> {
     pub fn new(recv_buffer: &mut [ReadBuffer; N]) -> Self {
         // Need to construct them inside of self first, otherwise the addresses will change
         // when they are copied into self.  Probably safer to pin the object, but I
@@ -137,9 +95,7 @@ impl<const N: usize> msghdr_x_helper<N> {
         &self,
         recv_buffer: &mut [ReadBuffer; N],
         num_packets_received: usize,
-    ) -> [SocketAddr; N] {
-        const IPV4: usize = std::mem::size_of::<libc::sockaddr_in>();
-        const IPV6: usize = std::mem::size_of::<libc::sockaddr_in6>();
+    ) -> std::io::Result<[SocketAddr; N]> {
         let mut result_addr = [SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0); N];
         for ((result_buffer, c_struct), addr) in recv_buffer
             .iter_mut()
@@ -151,39 +107,38 @@ impl<const N: usize> msghdr_x_helper<N> {
             result_buffer.added_unused(c_struct.msg_datalen);
             // msg_name has been filled with the source address, but we have to do some work to
             // convert them to useful types.
-            let src_addr_raw = c_struct.msg_name as *const u8;
-            let src_addr_raw =
-                unsafe { std::slice::from_raw_parts(src_addr_raw, c_struct.msg_namelen as usize) };
-            match src_addr_raw.len() {
-                IPV4 => {
-                    let addr_raw: [u8; IPV4] = src_addr_raw.try_into().unwrap();
-                    let addr_raw: libc::sockaddr_in = unsafe { std::mem::transmute(addr_raw) };
-                    let ip_raw = addr_raw.sin_addr.s_addr.swap_bytes();
-                    addr.set_ip(IpAddr::V4(ip_raw.into()));
-                    addr.set_port(addr_raw.sin_port.swap_bytes());
-                }
-                IPV6 => {
-                    let addr_raw: [u8; IPV6] = src_addr_raw.try_into().unwrap();
-                    let addr_raw: libc::sockaddr_in6 = unsafe { std::mem::transmute(addr_raw) };
-                    let ip_raw = addr_raw.sin6_addr.s6_addr;
-                    addr.set_ip(IpAddr::V6(ip_raw.into()));
-                    addr.set_port(addr_raw.sin6_port.swap_bytes());
-                }
-                _ => panic!("Unknown addr size: {}", c_struct.msg_namelen),
-            }
+            *addr = raw_to_socketaddr(c_struct.msg_name, c_struct.msg_namelen)?;
         }
-        result_addr
+        Ok(result_addr)
     }
 }
 
 #[cfg(test)]
 mod tests {
+
+    use std::net::SocketAddr;
+    use write_to::ReadFrom;
+
     use crate::{
+        client::utp::Header,
         common::{new_udp_socket, new_udp_socket_ipv6},
-        io::ReadBuffer,
+        io::{
+            sendmmsg::sendmmsg, sockaddr_in_to_socketaddr, socketaddrv4_to_sockaddr_in, ReadBuffer,
+        },
+        messages::{protocol_message::HasId, read_byte, Block},
     };
 
     use super::recvmmsg;
+    #[test]
+    fn test_sockaddr_convert() {
+        let socket = new_udp_socket();
+        let addr = socket.local_addr().unwrap();
+        let SocketAddr::V4(ipv4) = addr else {
+            panic!("unexpected ipv6")
+        };
+        let sockaddr_in = socketaddrv4_to_sockaddr_in(&ipv4);
+        assert_eq!(ipv4, sockaddr_in_to_socketaddr(sockaddr_in));
+    }
 
     #[test]
     fn test_size_0() {
@@ -247,5 +202,135 @@ mod tests {
         assert_eq!(data_to_send, get_recv(0));
         assert_eq!(data_to_send, get_recv(1));
         assert_eq!(data_to_send, get_recv(2));
+    }
+
+    #[test]
+    fn test_send_block() {
+        let random_bytes: Vec<u8> = (0..1024).map(|_| rand::random::<u8>()).collect();
+        let block = Block {
+            index: 731,
+            begin: 217,
+            block: random_bytes,
+        };
+        let send = new_udp_socket();
+        let recv = new_udp_socket();
+        let sent = sendmmsg(
+            block.clone(),
+            Header::new(
+                crate::client::utp::Type::StData,
+                1,
+                176,
+                12000,
+                1000,
+                0,
+                1500,
+            ),
+            117,
+            send,
+            recv.local_addr().unwrap(),
+        )
+        .unwrap();
+        let mut recv_buffer = [
+            ReadBuffer::new(180),
+            ReadBuffer::new(180),
+            ReadBuffer::new(180),
+            ReadBuffer::new(180),
+            ReadBuffer::new(180),
+            ReadBuffer::new(180),
+            ReadBuffer::new(180),
+            ReadBuffer::new(180),
+            ReadBuffer::new(180),
+            ReadBuffer::new(180),
+            ReadBuffer::new(180),
+            ReadBuffer::new(180),
+        ];
+        let (n_recv, _) = recvmmsg(&mut recv_buffer, recv).expect("no err");
+        assert_eq!(n_recv, sent);
+        // Read Length, Byte, index, begin, then block
+        let mut recv_block = Vec::new();
+        let remaining = recv_buffer[0].unread();
+        let (_, remaining) = Header::read_from(&mut recv_buffer[0], remaining).unwrap();
+        let (_, remaining) = u32::read_from(&mut recv_buffer[0], remaining).unwrap();
+        let id = read_byte(&mut recv_buffer[0]).unwrap();
+        assert_eq!(id, Block::ID);
+        let (index, remaining) = u32::read_from(&mut recv_buffer[0], remaining).unwrap();
+        assert_eq!(index, 731);
+        let (begin, _) = u32::read_from(&mut recv_buffer[0], remaining).unwrap();
+        assert_eq!(begin, 217);
+        // let (block_piece, _) = Vec::<u8>::read_from(&mut recv_buffer[0], remaining);
+        recv_block.extend(recv_buffer[0].get_unread());
+        for (i, packet) in recv_buffer.iter_mut().skip(1).enumerate() {
+            if packet.unread() == 0 {
+                println!("{i} packet has no data");
+                continue;
+            }
+            println!("{i} packet has data: {}", packet.unread());
+            let (_, _) = Header::read_from(packet, packet.unread()).unwrap();
+            recv_block.extend(packet.get_unread());
+        }
+        assert_eq!(block.block.len(), recv_block.len());
+        assert_eq!(block.block, recv_block);
+    }
+
+    #[test]
+    fn test_send_1_ipv4() {
+        let random_bytes: Vec<u8> = (0..1024).map(|_| rand::random::<u8>()).collect();
+        let block = Block {
+            index: 731,
+            begin: 217,
+            block: random_bytes,
+        };
+        let send = new_udp_socket();
+        let recv = new_udp_socket();
+        let sent = sendmmsg(
+            block,
+            Header::new(
+                crate::client::utp::Type::StData,
+                1,
+                176,
+                12000,
+                1000,
+                0,
+                1500,
+            ),
+            1500,
+            send,
+            recv.local_addr().unwrap(),
+        )
+        .unwrap();
+        let mut recv_buffer = [ReadBuffer::new(1600), ReadBuffer::new(180)];
+        let (n_recv, _) = recvmmsg(&mut recv_buffer, recv).expect("no err");
+        assert_eq!(n_recv, sent);
+    }
+
+    #[test]
+    fn test_send_1_ipv6() {
+        let random_bytes: Vec<u8> = (0..1024).map(|_| rand::random::<u8>()).collect();
+        let block = Block {
+            index: 731,
+            begin: 217,
+            block: random_bytes,
+        };
+        let send = new_udp_socket_ipv6();
+        let recv = new_udp_socket_ipv6();
+        let sent = sendmmsg(
+            block,
+            Header::new(
+                crate::client::utp::Type::StData,
+                1,
+                176,
+                12000,
+                1000,
+                0,
+                1500,
+            ),
+            1500,
+            send,
+            recv.local_addr().unwrap(),
+        )
+        .unwrap();
+        let mut recv_buffer = [ReadBuffer::new(1600), ReadBuffer::new(180)];
+        let (n_recv, _) = recvmmsg(&mut recv_buffer, recv).expect("no err");
+        assert_eq!(n_recv, sent);
     }
 }

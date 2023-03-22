@@ -212,6 +212,16 @@ impl Block {
         }
     }
 
+    pub fn prefix(&self) -> [u8; 13] {
+        let mut result = [0; 13];
+        let length = self.length() as u32 + 1; // Add ID byte
+        result[0..4].copy_from_slice(&length.to_be_bytes());
+        result[4] = Self::ID;
+        result[5..9].copy_from_slice(&self.index.to_be_bytes());
+        result[9..13].copy_from_slice(&self.begin.to_be_bytes());
+        result
+    }
+
     pub fn read_and_update<T: Read>(
         reader: &mut T,
         block_manager: &mut BlockManager,

@@ -3,6 +3,7 @@
 #![feature(try_blocks)]
 #![feature(let_chains)]
 #![feature(read_buf)]
+#![feature(int_roundings)]
 // #![feature(generic_const_exprs)]
 #![allow(clippy::new_without_default)]
 pub mod bencoding;

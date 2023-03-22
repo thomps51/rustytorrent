@@ -11,7 +11,10 @@ use mio::net::UdpSocket;
 use rand::Rng;
 use write_to::WriteTo;
 
-use crate::messages::ProtocolMessage;
+use crate::{
+    common::BLOCK_LENGTH,
+    messages::{Block, ProtocolMessage},
+};
 
 #[derive(Debug)]
 pub struct UtpSocket {
@@ -189,17 +192,7 @@ impl UtpSocket {
     }
 
     pub fn write_buf(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-        let ms = now.as_micros();
-        let header = Header::new(
-            Type::StData,
-            self.conn_id_send,
-            ms as _,
-            self.prev_timestamp_diff,
-            self.wnd_size,
-            self.seq_nr,
-            self.ack_nr,
-        );
+        let header = self.create_header(Type::StData);
         log::debug!(
             "write_buf sending {} bytes with header: {:?}",
             buf.len(),
@@ -217,17 +210,7 @@ impl UtpSocket {
     pub fn write<T: ProtocolMessage>(&mut self, msg: &T) -> std::io::Result<usize> {
         // TODO: Chunk up message into multiple packets if above a certain size (600-800 bytes?)
         log::debug!("UtpSocket::Write");
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-        let ms = now.as_micros();
-        let header = Header::new(
-            Type::StData,
-            self.conn_id_send,
-            ms as _,
-            self.prev_timestamp_diff,
-            self.wnd_size,
-            self.seq_nr,
-            self.ack_nr,
-        );
+        let header = self.create_header(Type::StData);
         self.seq_nr += 1;
         self.send_buffer.clear();
         header.write_to(&mut self.send_buffer)?;
@@ -236,5 +219,13 @@ impl UtpSocket {
         let sent = self.socket.send_to(&self.send_buffer, self.addr)?;
         self.send_buffer.clear();
         Ok(sent)
+    }
+
+    pub fn write_block(&mut self, msg: &Block) -> std::io::Result<usize> {
+        const PACKET_SIZE: usize = 600;
+        const NUM_HEADERS: usize = (BLOCK_LENGTH + PACKET_SIZE - 1) / PACKET_SIZE;
+        let data = [0u8; NUM_HEADERS];
+        // Use sendmmsg
+        Ok(0)
     }
 }
