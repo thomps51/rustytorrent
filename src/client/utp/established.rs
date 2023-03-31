@@ -378,6 +378,15 @@ impl EstablishedUtpConnection {
         Ok(())
     }
 
+    pub fn get_utp_header(&mut self) -> Header {
+        self.stream.create_header(Type::StData)
+    }
+
+    pub fn add_seq_nr(&mut self, sent: usize) {
+        let value = self.stream.seq_nr.wrapping_add(sent as _);
+        self.stream.seq_nr = value;
+    }
+
     pub fn send_disk_request(&self, request: Request) {
         self.disk_requester
             .send(DiskRequest::Request {

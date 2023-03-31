@@ -61,6 +61,8 @@ impl IncomingUtpConnection {
                 }
                 debug!("promoting incoming connection!");
                 let handshake_from_peer = Handshake::read_from(read_buffer)?;
+                // ACK the handshake
+                self.socket.send_header(Type::StState)?;
                 let handshake_to_peer =
                     Handshake::new(self.peer_id, &handshake_from_peer.info_hash);
                 handshake_to_peer.write_to(&mut self.send_buffer).unwrap();

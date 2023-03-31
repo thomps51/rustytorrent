@@ -30,6 +30,7 @@ use crate::client::utp::{
 use crate::common::PEER_ID_PREFIX;
 use crate::common::{MetaInfo, SharedBlockCache, SharedCount, PEER_ID_LENGTH};
 use crate::common::{Sha1Hash, SharedPieceAssigner};
+use crate::io::sendmmsg::UtpBlockSender;
 use crate::io::ReadBuffer;
 use crate::messages::{Bitfield, Block, Handshake, Have, Interested, Unchoke};
 use crate::tracker::{EventKind, PeerInfo, PeerInfoList};
@@ -53,6 +54,7 @@ pub struct ConnectionManager {
     poll: RcCell<Poll>,
     utp_socket: Rc<UdpSocket>,
     utp_connections: HashMap<(SocketAddr, u16), UtpConnection>,
+    utp_block_sender: UtpBlockSender,
 }
 
 pub struct ConnectionManagerConfig {
@@ -182,6 +184,7 @@ impl ConnectionManager {
             utp_socket: Rc::new(utp_socket),
             utp_connections: HashMap::new(),
             addr_to_info_hash: HashMap::new(),
+            utp_block_sender: UtpBlockSender::new(),
         }
     }
 
@@ -263,6 +266,7 @@ impl ConnectionManager {
                         token,
                         self.peer_id,
                     );
+                    debug!("Accepted new connection");
                     self.connections
                         .insert(token, Connection::Handshaking(peer));
                 }
@@ -553,11 +557,7 @@ impl ConnectionManager {
         if free == 0 || !torrent.peers_data.have_unconnected() {
             return;
         }
-        // let peer_list = torrent.peers_data.get_unconnected(free);
-        let peer_list = vec![PeerInfo {
-            addr: "127.0.0.1:1980".parse().unwrap(),
-            id: None,
-        }];
+        let peer_list = torrent.peers_data.get_unconnected(free);
         for peer_info in peer_list {
             debug!("Attempting connection to peer: {:?}", peer_info);
             // have setting for trying UDP connection first
@@ -705,19 +705,25 @@ impl ConnectionManager {
                 self.disconnect_peer(token, error.into());
             }
             ConnectionIdentifier::UtpId(addr, conn_id) => {
-                let error = if let Some(UtpConnection::Established(conn)) =
-                    self.utp_connections.get_mut(&(addr, conn_id))
-                {
-                    if let Err(error) = conn.send(&block) {
-                        error
-                    } else {
-                        return;
+                let Some(UtpConnection::Established(conn)) =
+                    self.utp_connections.get_mut(&(addr, conn_id)) else {return};
+
+                let utp_header = conn.get_utp_header();
+                match self.utp_block_sender.send(
+                    utp_header,
+                    self.utp_socket.as_ref(),
+                    1000,
+                    block,
+                    addr,
+                ) {
+                    // get_utp_header will actually add 1 to seq_nr, so we subtract one here.
+                    // probably should change that though.
+                    Ok(sent) => conn.add_seq_nr(sent - 1),
+                    Err(error) => {
+                        warn!("Error from sending UTP block: {:?}", error);
+                        // "disconnect" UTP peer? Send FIN
                     }
-                } else {
-                    return;
-                };
-                warn!("Error from sending UTP block: {:?}", error);
-                // "disconnect" UTP peer? Send FIN
+                }
             }
         }
     }

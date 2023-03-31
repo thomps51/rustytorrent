@@ -1,5 +1,5 @@
-Bittorrent client written from scratch in Rust initially for the purpose of learning Rust.
-My definition of "from scratch" here is that I did not use any existing code/libraries for things in the bittorrent spec.  This means for example I have my own bencoding parser/serializer, but I use other libraries where things aren't newly defined in the Bittorrent spec (e.g. using reqwest for HTTP GET calls to the tracker).
+Bittorrent client written from scratch in Rust initially for the purpose of learning Rust, but now is a hobby project.
+My definition of "from scratch" here is that I did not use any existing code/libraries for things in the bittorrent spec.  This means for example I have my own bencoding parser/serializer, but I use other libraries where things aren't newly defined in the Bittorrent spec (e.g. using reqwest for HTTP GET calls to the tracker).  This is true for everything but utp, because BEP29 is horrifyingly vague when you try to implement it that I resorted to looking at current implementations which didn't help, and then used wireshark on qBittorent to figure out how it worked.
 
 The current goal is to use only nonblocking network IO using mio.  Why?  Because it's neat and a challenge.  Maybe I'll give up and switch to async at some point.  The general model currently is that the main logic/network IO is all in one thread and we pass off the disk writes to another thread on piece completion.
 

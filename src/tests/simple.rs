@@ -104,7 +104,7 @@ mod tests {
                     listen_port: 6801,
                     max_peers: 50,
                     seed: false,
-                    print_output: true,
+                    print_output: false,
                 },
                 d_sender,
                 d_recv,

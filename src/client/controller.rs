@@ -266,6 +266,11 @@ impl Controller {
                 .borrow_mut()
                 .poll(&mut events, Some(Duration::from_secs(1)))
                 .unwrap();
+            if events.is_empty() {
+                debug!("no events!");
+            } else {
+                debug!("events: {:?}", events);
+            }
             for event in &events {
                 // if event is_writable, that means it is an outgoing TCP connection that is now connected
                 if event.is_writable() {

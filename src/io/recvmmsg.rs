@@ -123,7 +123,8 @@ mod tests {
         client::utp::Header,
         common::{new_udp_socket, new_udp_socket_ipv6},
         io::{
-            sendmmsg::sendmmsg, sockaddr_in_to_socketaddr, socketaddrv4_to_sockaddr_in, ReadBuffer,
+            sendmmsg::{sendmmsg, UtpBlockSender},
+            sockaddr_in_to_socketaddr, socketaddrv4_to_sockaddr_in, ReadBuffer,
         },
         messages::{protocol_message::HasId, read_byte, Block},
     };
@@ -214,22 +215,40 @@ mod tests {
         };
         let send = new_udp_socket();
         let recv = new_udp_socket();
-        let sent = sendmmsg(
-            block.clone(),
-            Header::new(
-                crate::client::utp::Type::StData,
-                1,
-                176,
-                12000,
-                1000,
-                0,
-                1500,
-            ),
-            117,
-            send,
-            recv.local_addr().unwrap(),
-        )
-        .unwrap();
+        // let sent = sendmmsg(
+        //     block.clone(),
+        //     Header::new(
+        //         crate::client::utp::Type::StData,
+        //         1,
+        //         176,
+        //         12000,
+        //         1000,
+        //         0,
+        //         1500,
+        //     ),
+        //     117,
+        //     send,
+        //     recv.local_addr().unwrap(),
+        // )
+        // .unwrap();
+        let mut block_sender = UtpBlockSender::new();
+        let sent = block_sender
+            .send(
+                Header::new(
+                    crate::client::utp::Type::StData,
+                    1,
+                    176,
+                    12000,
+                    1000,
+                    0,
+                    1500,
+                ),
+                &send,
+                117,
+                block.clone(),
+                recv.local_addr().unwrap(),
+            )
+            .unwrap();
         let mut recv_buffer = [
             ReadBuffer::new(180),
             ReadBuffer::new(180),
