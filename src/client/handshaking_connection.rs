@@ -1,5 +1,6 @@
 use log::debug;
 use mio::{Interest, Poll, Token};
+use write_to::WriteTo;
 
 use crate::common::{Sha1Hash, PEER_ID_LENGTH};
 use crate::io::ReadBuffer;

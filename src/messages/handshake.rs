@@ -5,6 +5,7 @@ use std::io::Write;
 use crate::common::Sha1Hash;
 use crate::common::SHA1_HASH_LENGTH;
 use log::{debug, info};
+use write_to::WriteTo;
 
 use super::read_byte;
 
@@ -46,8 +47,19 @@ impl Handshake {
         })
     }
 
-    pub fn write_to<T: Write>(&self, writer: &mut T) -> Result<(), Error> {
-        debug!("Writing handshake");
+    // pub fn write_to<T: Write>(&self, writer: &mut T) -> Result<(), Error> {
+    //     debug!("Writing handshake");
+    //     writer.write_all(&[Self::PSTR.len() as u8])?;
+    //     writer.write_all(Self::PSTR)?;
+    //     writer.write_all(&self.reserved)?;
+    //     writer.write_all(&self.info_hash)?;
+    //     writer.write_all(&self.peer_id)?;
+    //     Ok(())
+    // }
+}
+
+impl WriteTo for Handshake {
+    fn write_to<T: Write>(&self, writer: &mut T) -> std::io::Result<()> {
         writer.write_all(&[Self::PSTR.len() as u8])?;
         writer.write_all(Self::PSTR)?;
         writer.write_all(&self.reserved)?;

@@ -1,4 +1,5 @@
-use crate::client::utp::socket::UtpSocket;
+use crate::client::connection_manager::UtpSendBuffer;
+use crate::client::utp::socket::UtpConnectionInfo;
 use crate::client::utp::Type;
 use crate::client::UpdateError;
 use crate::{common::PEER_ID_LENGTH, messages::Handshake};
@@ -13,23 +14,21 @@ pub enum IncomingUtpState {
 }
 
 pub struct IncomingUtpConnection {
-    socket: UtpSocket,
+    pub(crate) socket: UtpConnectionInfo,
     state: IncomingUtpState,
     peer_id: [u8; PEER_ID_LENGTH],
-    send_buffer: Vec<u8>,
 }
 
 impl IncomingUtpConnection {
-    pub fn new(socket: UtpSocket, peer_id: [u8; PEER_ID_LENGTH]) -> Self {
+    pub fn new(socket: UtpConnectionInfo, peer_id: [u8; PEER_ID_LENGTH]) -> Self {
         IncomingUtpConnection {
             socket,
             state: IncomingUtpState::CsSynRecv,
             peer_id,
-            send_buffer: vec![],
         }
     }
 
-    pub fn promote(self) -> UtpSocket {
+    pub fn promote(self) -> UtpConnectionInfo {
         self.socket
     }
 
@@ -37,12 +36,13 @@ impl IncomingUtpConnection {
         &mut self,
         read_buffer: &mut crate::io::ReadBuffer,
         header: &Header,
+        send_buffer: &mut UtpSendBuffer,
     ) -> Result<HandshakingUpdateSuccess, UpdateError> {
         self.socket.process_header(header);
         debug!("update of state: {:?}", self.state);
         match self.state {
             IncomingUtpState::CsSynRecv => {
-                self.socket.send_header(Type::StState)?;
+                send_buffer.add_header(Type::StState);
                 self.state = IncomingUtpState::CsStateSent;
                 Ok(HandshakingUpdateSuccess::NoUpdate)
             }
@@ -62,12 +62,10 @@ impl IncomingUtpConnection {
                 debug!("promoting incoming connection!");
                 let handshake_from_peer = Handshake::read_from(read_buffer)?;
                 // ACK the handshake
-                self.socket.send_header(Type::StState)?;
-                let handshake_to_peer =
-                    Handshake::new(self.peer_id, &handshake_from_peer.info_hash);
-                handshake_to_peer.write_to(&mut self.send_buffer).unwrap();
-                self.socket.write_buf(&self.send_buffer).unwrap();
-                self.send_buffer.clear();
+                // If the handshake is in the same STDATA message as other BT messages, this will send an ACK twice? (also in Established)
+                // Does outgoing send the handshake with other data?
+                send_buffer.add_header(Type::StState);
+                send_buffer.add_data(Handshake::new(self.peer_id, &handshake_from_peer.info_hash));
                 Ok(HandshakingUpdateSuccess::Complete(handshake_from_peer))
             }
         }

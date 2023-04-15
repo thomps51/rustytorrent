@@ -7,7 +7,9 @@ use mio::net::UdpSocket;
 
 use crate::io::raw_to_socketaddr;
 
-use super::{msghdr_x, ReadBuffer};
+use super::{MsghdrX, ReadBuffer};
+
+const SYS_RECVMSG_X: usize = 480;
 
 // Receive multiple udp packets with a single system call.
 #[cfg(target_os = "macos")]
@@ -21,7 +23,6 @@ pub fn recvmmsg<const N: usize>(
     // https://opensource.apple.com/source/xnu/xnu-7195.101.1/tests/recvmsg_x_test.c.auto.html
     // SYS_RECVMSG_X def:
     // https://go.googlesource.com/sys/+/refs/heads/release-branch.go1.11/unix/zsysnum_darwin_386.go
-    const SYS_RECVMSG_X: usize = 480;
     let mut syscall_data = msghdr_x_recv_helper::new(recv_buffer);
     let num_packets_received = unsafe {
         libc::syscall(
@@ -39,9 +40,103 @@ pub fn recvmmsg<const N: usize>(
     Ok((num_packets_received as _, result_addr))
 }
 
+pub struct UtpReceiver {
+    recv_buffers: Vec<ReadBuffer>,
+    inner: Vec<MsghdrX>,
+    // These are never read, but need to live as long as inner because inner contains
+    // mutable pointers to the data in both.
+    #[allow(dead_code)]
+    iovecs: Vec<libc::iovec>,
+    #[allow(dead_code)]
+    src_addrs: Vec<[u8; std::mem::size_of::<libc::sockaddr_in6>()]>,
+}
+
+pub struct PacketData<'a> {
+    pub buffer: &'a mut ReadBuffer,
+    pub addr: std::io::Result<SocketAddr>,
+}
+
+impl<'a> Drop for PacketData<'a> {
+    fn drop(&mut self) {
+        self.buffer.clear()
+    }
+}
+
+impl UtpReceiver {
+    pub fn new(num_buffers: usize, capacity: usize) -> Self {
+        let mut result = Self {
+            recv_buffers: vec![ReadBuffer::new(capacity); num_buffers],
+            inner: vec![MsghdrX::default(); num_buffers],
+            iovecs: vec![
+                libc::iovec {
+                    iov_base: std::ptr::null_mut(),
+                    iov_len: 0,
+                };
+                num_buffers
+            ],
+            src_addrs: vec![[0u8; std::mem::size_of::<libc::sockaddr_in6>()]; num_buffers],
+        };
+        for (((buffer, c_struct), iovec), src_addr) in result
+            .recv_buffers
+            .iter_mut()
+            .zip(result.inner.iter_mut())
+            .zip(result.iovecs.iter_mut())
+            .zip(result.src_addrs.iter_mut())
+        {
+            // msg_iov is filled with the packet data, so we put pointers
+            // to recv_buffer in it so recv_buffer is directly filled.
+            *iovec = libc::iovec {
+                iov_base: buffer.get_unused_mut().as_mut_ptr() as _,
+                iov_len: buffer.unused(),
+            };
+            c_struct.msg_iov = iovec as *mut iovec;
+            c_struct.msg_iovlen = 1;
+            // msg_name is populated by the source address of the packet.
+            c_struct.msg_name = src_addr.as_mut_ptr() as _;
+            c_struct.msg_namelen = src_addr.len() as u32;
+        }
+        result
+    }
+
+    pub fn num_buffers(&self) -> usize {
+        self.inner.len()
+    }
+
+    pub fn recv(
+        &mut self,
+        socket: &UdpSocket,
+    ) -> std::io::Result<impl Iterator<Item = PacketData<'_>> + '_> {
+        let num_packets_received = unsafe {
+            libc::syscall(
+                SYS_RECVMSG_X as _,
+                socket.as_raw_fd() as usize,
+                self.inner.as_mut_ptr() as usize,
+                self.inner.len(),
+                0,
+            )
+        };
+        if num_packets_received < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(self
+            .recv_buffers
+            .iter_mut()
+            .zip(self.inner.iter())
+            .take(num_packets_received as _)
+            .map(|(result_buffer, c_struct)| {
+                result_buffer.added_unused(c_struct.msg_datalen);
+                let addr = raw_to_socketaddr(c_struct.msg_name, c_struct.msg_namelen);
+                PacketData {
+                    buffer: result_buffer,
+                    addr,
+                }
+            }))
+    }
+}
+
 #[allow(non_camel_case_types)]
 struct msghdr_x_recv_helper<const N: usize> {
-    inner: [msghdr_x; N],
+    inner: [MsghdrX; N],
     // These are never read, but need to live as long as inner because inner contains
     // mutable pointers to the data in both.
     #[allow(dead_code)]
@@ -56,7 +151,7 @@ impl<const N: usize> msghdr_x_recv_helper<N> {
         // when they are copied into self.  Probably safer to pin the object, but I
         // want to avoid the allocation required to pin it to the heap.
         let mut result = Self {
-            inner: [msghdr_x::default(); N],
+            inner: [MsghdrX::default(); N],
             iovecs: [libc::iovec {
                 iov_base: std::ptr::null_mut(),
                 iov_len: 0,
@@ -233,7 +328,7 @@ mod tests {
         // .unwrap();
         let mut block_sender = UtpBlockSender::new();
         let sent = block_sender
-            .send(
+            .send_block(
                 Header::new(
                     crate::client::utp::Type::StData,
                     1,

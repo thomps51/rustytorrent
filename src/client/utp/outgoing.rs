@@ -1,4 +1,5 @@
-use crate::client::utp::socket::UtpSocket;
+use crate::client::connection_manager::UtpSendBuffer;
+use crate::client::utp::socket::UtpConnectionInfo;
 use crate::client::utp::{HandshakingUpdateSuccess, Type};
 use crate::client::UpdateError;
 use crate::common::Sha1Hash;
@@ -15,32 +16,27 @@ pub enum OutgoingUtpState {
 }
 
 pub struct OutgoingUtpConnection {
-    pub socket: UtpSocket,
+    pub(crate) socket: UtpConnectionInfo,
     state: OutgoingUtpState,
     info_hash: Sha1Hash,
     peer_id: [u8; PEER_ID_LENGTH],
-    send_buffer: Vec<u8>,
 }
 
 impl OutgoingUtpConnection {
     pub fn new(
-        mut socket: UtpSocket,
+        socket: UtpConnectionInfo,
         info_hash: Sha1Hash,
         peer_id: [u8; PEER_ID_LENGTH],
-    ) -> std::io::Result<Self> {
-        debug!("Creaing OutgoingUtpConnection of type");
-        // send initial packet
-        socket.send_syn()?;
-        Ok(Self {
+    ) -> Self {
+        Self {
             socket,
             state: OutgoingUtpState::CsSynSent,
             info_hash,
-            send_buffer: Vec::new(),
             peer_id,
-        })
+        }
     }
 
-    pub fn promote(self) -> UtpSocket {
+    pub fn promote(self) -> UtpConnectionInfo {
         self.socket
     }
 
@@ -48,6 +44,7 @@ impl OutgoingUtpConnection {
         &mut self,
         read_buffer: &mut crate::io::ReadBuffer,
         header: &Header,
+        send_buffer: &mut UtpSendBuffer,
     ) -> Result<HandshakingUpdateSuccess, UpdateError> {
         self.socket.process_header(header);
         debug!("update of state: {:?}", self.state);
@@ -72,10 +69,7 @@ impl OutgoingUtpConnection {
                 self.state = OutgoingUtpState::HandshakeSent;
                 self.socket.ack_nr = header.seq_nr - 1; // Handshake ack_nr seems to be SEQ_NR - 1
                 debug!("Outgoing connection, sending handshake");
-                let handshake_to_peer = Handshake::new(self.peer_id, &self.info_hash);
-                handshake_to_peer.write_to(&mut self.send_buffer).unwrap();
-                self.socket.write_buf(&self.send_buffer).unwrap();
-                self.send_buffer.clear();
+                send_buffer.add_data(Handshake::new(self.peer_id, &self.info_hash));
                 Ok(HandshakingUpdateSuccess::NoUpdate)
             }
             OutgoingUtpState::HandshakeSent => {
@@ -94,6 +88,20 @@ impl OutgoingUtpConnection {
                 Ok(HandshakingUpdateSuccess::NoUpdate)
             }
             OutgoingUtpState::HandshakeAcked => {
+                // TODO: why am I getting a double ACK herre in testing?
+                if header.get_type() == Type::StState {
+                    return Ok(HandshakingUpdateSuccess::NoUpdate);
+                }
+                if header.get_type() != Type::StData {
+                    log::warn!(
+                        "Unexpected header type in state HandShakeAcked from {:?}: {:?}",
+                        self.socket.addr(),
+                        header.get_type()
+                    );
+                    return Err(crate::client::UpdateError::CommunicationError(
+                        std::io::ErrorKind::InvalidData.into(),
+                    ));
+                }
                 // I will likely receive an ACK before the handshake
                 let handshake_from_peer = Handshake::read_from(read_buffer)?;
                 // may have more than just handshake data, including have info, unchoke, etc

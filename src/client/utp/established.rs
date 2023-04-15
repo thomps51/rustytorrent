@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::io::{self, Read, Write};
 use std::sync::mpsc::Sender;
 
+use crate::client::connection_manager::UtpSendBuffer;
 use crate::client::disk_manager::{ConnectionIdentifier, DiskRequest};
 use crate::client::{BlockManager, UpdateError, UpdateResult};
 use crate::common::BLOCK_LENGTH;
@@ -11,8 +12,8 @@ use crate::{
     common::{Sha1Hash, SharedBlockCache, SharedCount, SharedPieceAssigner},
     io::ReadBuffer,
     messages::{
-        read_byte, Bitfield, Block, Cancel, Choke, Have, Interested, NotInterested, Port,
-        ProtocolMessage, Request, Unchoke,
+        read_byte, Bitfield, Block, Cancel, Choke, Have, Interested, NotInterested, Port, Request,
+        Unchoke,
     },
 };
 use anyhow::Context;
@@ -21,7 +22,7 @@ use log::debug;
 use log::info;
 use write_to::ReadFrom;
 
-use super::{Header, Type, UtpSocket};
+use super::{Header, Type, UtpConnectionInfo};
 
 pub struct EstablishedUtpConnection {
     pub info_hash: Sha1Hash,
@@ -31,7 +32,7 @@ pub struct EstablishedUtpConnection {
     peer_choking: bool,
     peer_interested: bool,
     peer_has: BitVec,
-    stream: UtpSocket,
+    pub(crate) stream: UtpConnectionInfo,
     last_keep_alive: std::time::Instant,
     block_manager: BlockManager,
     pending_peer_cancels: Vec<Cancel>,
@@ -138,7 +139,7 @@ impl EstablishedUtpConnection {
     pub fn new(
         id: usize,
         info_hash: Sha1Hash,
-        stream: UtpSocket,
+        stream: UtpConnectionInfo,
         num_pieces: usize,
         piece_assigner: SharedPieceAssigner,
         disk_requester: Sender<DiskRequest>,
@@ -190,7 +191,7 @@ impl EstablishedUtpConnection {
         let (next_sequence_number, _) = self.next_sequence_number.overflowing_add(1);
         self.next_sequence_number = next_sequence_number;
         loop {
-            let retval = self.read(read_buffer, header)?;
+            let retval = self.read(read_buffer, header).unwrap();
             debug!("Remaining read buffer size: {}", read_buffer.unread());
             if read_buffer.unread() == 0 {
                 loop {
@@ -225,9 +226,6 @@ impl EstablishedUtpConnection {
                 UpdateSuccess::Success => continue,
             }
         }
-        // Ok(UpdateSuccess::NoUpdate)
-        //     UpdateSuccess::NoUpdate.into()
-        // };
         if total_downloaded != 0 {
             Ok(UpdateSuccess::Transferred {
                 downloaded: total_downloaded,
@@ -347,6 +345,7 @@ impl EstablishedUtpConnection {
             },
             Bitfield => [msg] {
                 self.peer_has = msg.bitfield;
+                // Bitvec needs to be truncated since it contains padding
                 self.peer_has.truncate(self.num_pieces);
             },
             Request => [msg] {
@@ -373,11 +372,6 @@ impl EstablishedUtpConnection {
         self.last_keep_alive = std::time::Instant::now();
     }
 
-    pub fn send<T: ProtocolMessage>(&mut self, message: &T) -> std::io::Result<()> {
-        self.stream.write(message)?;
-        Ok(())
-    }
-
     pub fn get_utp_header(&mut self) -> Header {
         self.stream.create_header(Type::StData)
     }
@@ -397,14 +391,12 @@ impl EstablishedUtpConnection {
             .unwrap();
     }
 
-    fn send_block_requests(&mut self) -> UpdateResult {
+    fn send_block_requests(&mut self, send_buffer: &mut UtpSendBuffer) -> UpdateResult {
         if !self.peer_choking {
             debug!("Peer is not choking");
-            let sent = self.block_manager.send_block_requests(
-                &mut self.stream,
-                &self.peer_has,
-                self.id,
-            )?;
+            let sent =
+                self.block_manager
+                    .send_block_requests(send_buffer, &self.peer_has, self.id)?;
             if sent == 0 {
                 debug!("No block requests sent");
                 return Ok(UpdateSuccess::NoUpdate);
@@ -418,7 +410,12 @@ impl EstablishedUtpConnection {
 }
 
 impl EstablishedUtpConnection {
-    pub fn update(&mut self, read_buffer: &mut ReadBuffer, header: &Header) -> UpdateResult {
+    pub fn update(
+        &mut self,
+        read_buffer: &mut ReadBuffer,
+        header: &Header,
+        send_buffer: &mut UtpSendBuffer,
+    ) -> UpdateResult {
         if header.get_type() == Type::StState {
             // ACK
             return Ok(UpdateSuccess::NoUpdate);
@@ -430,7 +427,7 @@ impl EstablishedUtpConnection {
         }
         self.stream.process_header(header);
         // TODO: maybe ACK only completed blocks?
-        self.stream.send_header(Type::StState)?;
+        send_buffer.add_header(Type::StState);
         let read_result = match self.read_all(read_buffer, header) {
             Ok(read_result) => read_result,
             Err(error) => {
@@ -448,7 +445,7 @@ impl EstablishedUtpConnection {
                     return Ok(read_result);
                 }
                 debug!("Connection {} sending block requests", self.id);
-                let request_result = self.send_block_requests()?;
+                let request_result = self.send_block_requests(send_buffer)?;
                 match (&read_result, request_result) {
                     (UpdateSuccess::NoUpdate, UpdateSuccess::NoUpdate) => {
                         Ok(UpdateSuccess::NoUpdate)

@@ -16,6 +16,7 @@ use std::io::Write;
 //   shift_left()
 //
 //   YYYYY----------------------------
+#[derive(Clone)]
 pub struct ReadBuffer {
     unread_start: usize,
     unused_start: usize,

@@ -3,10 +3,11 @@ use rccell::RcCell;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::convert::TryInto;
+use std::io::Write;
 use std::iter::FromIterator;
 use std::rc::Rc;
 use std::sync::mpsc::Sender;
-use write_to::ReadFrom;
+use write_to::{ReadFrom, WriteTo};
 
 use bit_vec::BitVec;
 use log::{debug, info, warn};
@@ -18,21 +19,23 @@ use super::block_cache::BlockCache;
 use super::disk_manager::{ConnectionIdentifier, DiskRequest};
 use super::piece_info::PieceInfo;
 use super::tracker_manager::TrackerRequest;
+use super::utp::Type;
 use super::{piece_assigner::PieceAssigner, HandshakingConnection};
 use super::{
     Connection, EstablishedConnection, HandshakeUpdateSuccess, UpdateError, UpdateSuccess,
 };
 use crate::client::connection::ConnectionBase;
 use crate::client::utp::{
-    EstablishedUtpConnection, HandshakingUpdateSuccess, Header, IncomingUtpConnection,
-    OutgoingUtpConnection, UtpConnection, UtpSocket,
+    EstablishedUtpConnection, Header, IncomingUtpConnection, OutgoingUtpConnection, UtpConnection,
+    UtpConnectionInfo,
 };
 use crate::common::PEER_ID_PREFIX;
 use crate::common::{MetaInfo, SharedBlockCache, SharedCount, PEER_ID_LENGTH};
 use crate::common::{Sha1Hash, SharedPieceAssigner};
+use crate::io::recvmmsg::{PacketData, UtpReceiver};
 use crate::io::sendmmsg::UtpBlockSender;
 use crate::io::ReadBuffer;
-use crate::messages::{Bitfield, Block, Handshake, Have, Interested, Unchoke};
+use crate::messages::{Bitfield, Block, Handshake, Have, Interested, ProtocolMessage, Unchoke};
 use crate::tracker::{EventKind, PeerInfo, PeerInfoList};
 
 const PRINT_UPDATE_TIME: std::time::Duration = std::time::Duration::from_secs(1);
@@ -49,12 +52,81 @@ pub struct ConnectionManager {
     peer_id: [u8; PEER_ID_LENGTH],
     tracker_sender: Sender<TrackerRequest>,
     token_to_info_hash: HashMap<Token, Sha1Hash>,
-    addr_to_info_hash: HashMap<SocketAddr, Sha1Hash>,
+    addr_to_info_hash: HashMap<(SocketAddr, u16), Sha1Hash>,
     read_buffer: ReadBuffer,
+    utp_send_buffer: UtpSendBuffer,
     poll: RcCell<Poll>,
     utp_socket: Rc<UdpSocket>,
     utp_connections: HashMap<(SocketAddr, u16), UtpConnection>,
     utp_block_sender: UtpBlockSender,
+    utp_receiver: UtpReceiver,
+}
+
+#[derive(Default)]
+pub struct UtpSendBuffer {
+    data_buffer: Vec<u8>,
+    header_only: Vec<Type>,
+    header_buffer: [u8; Header::SIZE],
+}
+
+impl UtpSendBuffer {
+    pub fn add_message<T: ProtocolMessage>(&mut self, message: T) {
+        message
+            .write(&mut self.data_buffer)
+            .expect("vec write can't fail");
+    }
+
+    pub fn add_data<T: WriteTo>(&mut self, data: T) {
+        data.write_to(&mut self.data_buffer)
+            .expect("vec write can't fail");
+    }
+
+    pub fn add_header(&mut self, header: Type) {
+        self.header_only.push(header);
+    }
+
+    pub fn send(
+        &mut self,
+        utp_sender: &mut UtpBlockSender,
+        socket: &UdpSocket,
+        conn_info: &mut UtpConnectionInfo,
+    ) -> std::io::Result<()> {
+        for header_type in self.header_only.drain(..) {
+            let header = conn_info.create_header(header_type);
+            header
+                .write_to(&mut self.header_buffer.as_mut_slice())
+                .unwrap();
+            socket.send_to(&self.header_buffer, conn_info.addr())?;
+        }
+        if self.data_buffer.is_empty() {
+            return Ok(());
+        }
+        let header = conn_info.create_header(Type::StData);
+        // TODO: get packet size from conn_info
+        let sent = utp_sender.send(
+            header,
+            socket,
+            1000,
+            &mut self.data_buffer,
+            conn_info.addr(),
+        )?;
+        self.data_buffer.clear();
+        // sent - 1 because create_header adds one (TODO: This smells)
+        let value = conn_info.seq_nr.wrapping_add((sent - 1) as u16);
+        conn_info.seq_nr = value;
+        Ok(())
+    }
+}
+
+impl Write for UtpSendBuffer {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.data_buffer.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 pub struct ConnectionManagerConfig {
@@ -78,9 +150,11 @@ pub struct TorrentData {
 
 // Token to info_hash map
 
+#[derive(Default)]
 pub struct PeersData {
     connected_id: HashSet<[u8; PEER_ID_LENGTH]>,
     token_to_info: HashMap<Token, PeerInfo>,
+    utp_connected: HashMap<(SocketAddr, u16), [u8; PEER_ID_LENGTH]>,
     connected_socketaddr: HashSet<SocketAddr>,
     unconnected: Vec<PeerInfo>,
 }
@@ -88,15 +162,6 @@ pub struct PeersData {
 // Need to query by both Token and PeerId
 // iter connections?  Shared ptr to connections?  Replace connections in manager with something like this?
 impl PeersData {
-    pub fn new() -> Self {
-        Self {
-            connected_id: HashSet::new(),
-            token_to_info: HashMap::new(),
-            connected_socketaddr: HashSet::new(),
-            unconnected: Vec::new(),
-        }
-    }
-
     pub fn add_peers_from_tracker(&mut self, peers: Vec<PeerInfo>) {
         for peer in peers {
             if let Some(id) = peer.id {
@@ -116,6 +181,16 @@ impl PeersData {
             .or_insert(PeerInfo { addr, id: None });
         peer_info.id = Some(id);
         self.connected_id.insert(id);
+    }
+
+    pub fn add_connected_id_utp(
+        &mut self,
+        connection_id: u16,
+        id: [u8; PEER_ID_LENGTH],
+        addr: SocketAddr,
+    ) {
+        self.connected_id.insert(id);
+        self.utp_connected.insert((addr, connection_id), id);
     }
 
     pub fn get_unconnected(&mut self, amount: usize) -> Vec<PeerInfo> {
@@ -139,6 +214,13 @@ impl PeersData {
         self.token_to_info.insert(token, peer_info);
     }
 
+    pub fn connected_utp(&mut self, _id: u16, peer_info: PeerInfo) {
+        if let Some(id) = peer_info.id {
+            self.connected_id.insert(id);
+        }
+        self.connected_socketaddr.insert(peer_info.addr);
+    }
+
     pub fn disconnected(&mut self, token: Token) {
         let PeerInfo { addr, id } = self.token_to_info[&token];
         if let Some(id) = id {
@@ -147,10 +229,14 @@ impl PeersData {
         self.connected_socketaddr.remove(&addr);
         self.token_to_info.remove(&token);
     }
-}
 
-enum PromotionEvent {
-    CompletedHandshake(Handshake),
+    pub fn disconnected_utp(&mut self, addr: SocketAddr, id: u16) {
+        let id = self.utp_connected.remove(&(addr, id));
+        if let Some(id) = id {
+            self.connected_id.remove(&id);
+        }
+        self.connected_socketaddr.remove(&addr);
+    }
 }
 
 impl ConnectionManager {
@@ -167,6 +253,14 @@ impl ConnectionManager {
             .map(char::from);
         let mut peer_id = PEER_ID_PREFIX.to_owned();
         peer_id.extend(peer_id_suffix);
+        use sysctl::Sysctl;
+        let max_udp_packet_size =
+            match sysctl::Ctl::new("net.inet.udp.maxdgram").map(|x| x.value_as::<u32>()) {
+                Ok(Ok(value)) => *value as usize,
+                _ => 65507,
+            };
+        let num_read_buffers = (1 << 20) / max_udp_packet_size;
+
         ConnectionManager {
             connections: HashMap::new(),
             downloaded: 0,
@@ -185,6 +279,8 @@ impl ConnectionManager {
             utp_connections: HashMap::new(),
             addr_to_info_hash: HashMap::new(),
             utp_block_sender: UtpBlockSender::new(),
+            utp_receiver: UtpReceiver::new(num_read_buffers, max_udp_packet_size),
+            utp_send_buffer: Default::default(),
         }
     }
 
@@ -244,7 +340,7 @@ impl ConnectionManager {
             block_cache,
             have_on_disk: piece_have,
             disk_requester: disk_sender,
-            peers_data: PeersData::new(),
+            peers_data: Default::default(),
         };
         self.torrents.insert(info_hash, torrent_data);
     }
@@ -295,132 +391,151 @@ impl ConnectionManager {
     }
 
     pub fn handle_utp_event_inner(&mut self) -> Result<(), UpdateError> {
-        const MAX_UDP_PACKET_SIZE: usize = 65507;
-        self.read_buffer.clear();
-        // read header and optional message
-        if self.read_buffer.unused() < MAX_UDP_PACKET_SIZE {
-            self.read_buffer.shift_left();
-        }
-        let buffer = self.read_buffer.get_unused_mut();
-        let (read, addr) = self.utp_socket.recv_from(buffer)?;
-        debug!("Received packet of size {}", read);
-        self.read_buffer.added_unused(read);
+        let mut num_packets = 0;
+        let mut to_disconnect = vec![];
+        for PacketData {
+            buffer: ref mut read_buffer,
+            ref addr,
+        } in self.utp_receiver.recv(&self.utp_socket)?
+        {
+            num_packets += 1;
+            let read = read_buffer.unread();
+            if read != 20 && read_buffer.get_unread()[0] == "d".as_bytes()[0] {
+                info!("message is DHT info, ignoring");
+                continue;
+            }
 
-        if read != 20 && self.read_buffer.get_unread()[0] == "d".as_bytes()[0] {
-            info!("message is DHT info, ignoring");
-            self.read_buffer.clear();
-            return Ok(());
-        }
-
-        let (header, remaining) = Header::read_from(&mut self.read_buffer, read)?;
-        debug!(
-            "Received header from {:?}: {:?}: remaining {}: {:?}",
-            addr,
-            header.get_type(),
-            remaining,
-            header
-        );
-        if header.get_type() == crate::client::utp::Type::StFin {
+            let (header, remaining) = Header::read_from(read_buffer, read)?;
             debug!(
-                "ST_FIN received, remaining: {:?}",
-                self.read_buffer.get_unread()
+                "Received header from {:?}: {:?}: remaining {}: {:?}",
+                addr,
+                header.get_type(),
+                remaining,
+                header
             );
+            // Ugly parameter list to avoid borrow checker complaints...
+            match Self::handle_utp_event_more_inner(
+                read_buffer,
+                &header,
+                addr,
+                &mut self.utp_connections,
+                self.peer_id,
+                &mut self.torrents,
+                &mut self.addr_to_info_hash,
+                &mut self.utp_send_buffer,
+            ) {
+                Ok((addr, connection_id)) => {
+                    // TODO: optimize this lookup, it isn't necessary size we already did it in handle_utp_event_more_inner
+                    let connection = self
+                        .utp_connections
+                        .get_mut(&(addr, connection_id))
+                        .unwrap();
+                    if let Err(error) = self.utp_send_buffer.send(
+                        &mut self.utp_block_sender,
+                        &self.utp_socket,
+                        connection.connection_info(),
+                    ) {
+                        warn!("Failed to connect to peer: {:?}", error);
+                        continue;
+                    }
+                }
+                Err(error) => {
+                    warn!("utp error: {:?}", error);
+                    if let Ok(addr) = addr {
+                        to_disconnect.push((*addr, header.connection_id, error));
+                    }
+                    // TODO: disconnect and ST_FIN
+                    continue;
+                }
+            }
+        }
+        for (addr, id, error) in to_disconnect {
+            self.disconnect_peer_utp(addr, id, error);
+        }
+        if num_packets < self.utp_receiver.num_buffers() {
+            return Err(std::io::ErrorKind::WouldBlock.into());
+        }
+        Ok(())
+    }
+
+    pub fn handle_utp_event_more_inner(
+        read_buffer: &mut ReadBuffer,
+        header: &Header,
+        addr: &std::io::Result<SocketAddr>,
+        utp_connections: &mut HashMap<(SocketAddr, u16), UtpConnection>,
+        peer_id: [u8; PEER_ID_LENGTH],
+        torrents: &mut HashMap<Sha1Hash, TorrentData>,
+        addr_to_info_hash: &mut HashMap<(SocketAddr, u16), Sha1Hash>,
+        utp_send_buffer: &mut UtpSendBuffer,
+    ) -> Result<(SocketAddr, u16), UpdateError> {
+        if header.get_type() == crate::client::utp::Type::StFin {
+            debug!("ST_FIN received, remaining: {:?}", read_buffer.get_unread());
         }
         // If connection id is not in connections, add one to it when we insert it per the spec
         let connection_id = header.connection_id;
-        let connection = match self.utp_connections.entry((addr, connection_id)) {
-            std::collections::hash_map::Entry::Occupied(v) => v.into_mut(),
-            std::collections::hash_map::Entry::Vacant(_) => self
-                .utp_connections
-                .entry((addr, connection_id + 1))
-                .or_insert_with(|| {
-                    UtpConnection::Incoming(IncomingUtpConnection::new(
-                        UtpSocket::new_from_incoming(self.utp_socket.clone(), addr, &header),
-                        self.peer_id,
-                    ))
-                }),
-        };
-        let event = match connection {
-            UtpConnection::Incoming(conn) => {
-                // assert_eq!(0, remaining); // Expecting only headers
-                if let HandshakingUpdateSuccess::Complete(handshake) =
-                    conn.update(&mut self.read_buffer, &header)?
-                {
-                    PromotionEvent::CompletedHandshake(handshake)
-                } else {
-                    return Ok(());
-                }
-            }
-            UtpConnection::Outgoing(conn) => {
-                if let HandshakingUpdateSuccess::Complete(handshake) =
-                    conn.update(&mut self.read_buffer, &header)?
-                {
-                    PromotionEvent::CompletedHandshake(handshake)
-                } else {
-                    return Ok(());
-                }
-            }
-            UtpConnection::Established(conn) => {
-                match conn.update(&mut self.read_buffer, &header)? {
-                    UpdateSuccess::Transferred {
-                        downloaded,
-                        uploaded,
-                    } => {
-                        self.downloaded += downloaded;
-                        self.uploaded += uploaded;
-                    }
-                    UpdateSuccess::NoUpdate | UpdateSuccess::Success => {}
-                }
-                return Ok(());
+        let addr = *addr.as_ref()?;
+        let (connection, connection_id) = match utp_connections.entry((addr, connection_id)) {
+            std::collections::hash_map::Entry::Occupied(v) => (v.into_mut(), connection_id),
+            std::collections::hash_map::Entry::Vacant(_) => {
+                let connection_id = connection_id + 1;
+                (
+                    utp_connections
+                        .entry((addr, connection_id))
+                        .or_insert_with(|| {
+                            UtpConnection::Incoming(IncomingUtpConnection::new(
+                                UtpConnectionInfo::new_from_incoming(addr, header),
+                                peer_id,
+                            ))
+                        }),
+                    connection_id,
+                )
             }
         };
-        match event {
-            PromotionEvent::CompletedHandshake(handshake) => {
-                let torrent_data =
-                    if let Some(torrent_data) = self.torrents.get_mut(&handshake.info_hash) {
-                        torrent_data
-                    } else {
-                        return Err(UpdateError::TorrentNotManaged {
-                            info_hash: handshake.info_hash,
-                        });
-                    };
-                if torrent_data.peers_data.is_connected(&handshake.peer_id)
-                    || handshake.peer_id == self.peer_id
-                {
-                    return Err(UpdateError::CommunicationError(
-                        std::io::ErrorKind::AlreadyExists.into(),
-                    ));
-                }
-                let peer = self.utp_connections.remove(&(addr, connection_id)).unwrap();
-                let socket = peer.promote();
-                self.addr_to_info_hash.insert(addr, handshake.info_hash);
-                // torrent_data // TODO figure out if I need to do this
-                //     .peers_data
-                //     .add_connected_id(token, handshake.peer_id, addr);
-                let mut promoted = EstablishedUtpConnection::new(
-                    0, // Add UTP Ids
-                    torrent_data.info_hash,
-                    socket,
-                    torrent_data.piece_info.total_pieces,
-                    torrent_data.piece_assigner.clone(),
-                    torrent_data.disk_requester.clone(),
-                    torrent_data.block_cache.clone(),
-                    torrent_data.downloaded.clone(),
-                    torrent_data.uploaded.clone(),
-                );
-                // Send this in one ST_DATA message
-                promoted.send(&Bitfield {
-                    bitfield: torrent_data.have_on_disk.clone(),
-                })?;
-                promoted.send(&Unchoke {})?;
-                promoted.send(&Interested {})?;
-                // Call update in case we have more data with the handshake
-                promoted.update(&mut self.read_buffer, &header)?;
-                self.utp_connections
-                    .insert((addr, connection_id), UtpConnection::Established(promoted));
-            }
+        let Some(handshake) = connection.update(header, read_buffer, utp_send_buffer)? else {
+            return Ok((addr, connection_id))
+        };
+
+        let Some(torrent_data) = torrents.get_mut(&handshake.info_hash) else {
+            return Err(UpdateError::TorrentNotManaged {
+                info_hash: handshake.info_hash,
+            });
+        };
+        if torrent_data.peers_data.is_connected(&handshake.peer_id) || handshake.peer_id == peer_id
+        {
+            return Err(UpdateError::CommunicationError(
+                std::io::ErrorKind::AlreadyExists.into(),
+            ));
         }
-        Ok(())
+        let peer = utp_connections.remove(&(addr, connection_id)).unwrap();
+        let socket = peer.promote();
+        addr_to_info_hash.insert((addr, header.connection_id), handshake.info_hash);
+        torrent_data
+            .peers_data
+            .add_connected_id_utp(socket.conn_id_recv, handshake.peer_id, addr);
+        let mut promoted = EstablishedUtpConnection::new(
+            0, // Add UTP Ids
+            torrent_data.info_hash,
+            socket,
+            torrent_data.piece_info.total_pieces,
+            torrent_data.piece_assigner.clone(),
+            torrent_data.disk_requester.clone(),
+            torrent_data.block_cache.clone(),
+            torrent_data.downloaded.clone(),
+            torrent_data.uploaded.clone(),
+        );
+        utp_send_buffer.add_message(Bitfield {
+            bitfield: torrent_data.have_on_disk.clone(),
+        });
+        utp_send_buffer.add_message(Unchoke {});
+        utp_send_buffer.add_message(Interested {});
+        // Call update in case we have more data with the handshake
+        // Actually required even when unread is zero..., why is this? Has something to do with
+        // Phantom ACK showing up in outgoing.
+        // if read_buffer.unread() > 0 {
+        promoted.update(read_buffer, header, utp_send_buffer)?;
+        // }
+        utp_connections.insert((addr, connection_id), UtpConnection::Established(promoted));
+        Ok((addr, connection_id))
     }
 
     pub fn handle_event(&mut self, token: Token) {
@@ -437,7 +552,6 @@ impl ConnectionManager {
             return Ok(());
         };
         match peer {
-            // Connection::Initiating(_) => todo!(),
             Connection::Handshaking(connection) => {
                 match connection.update(&mut self.read_buffer)? {
                     HandshakeUpdateSuccess::NoUpdate => {}
@@ -529,6 +643,24 @@ impl ConnectionManager {
         None
     }
 
+    pub fn disconnect_peer_utp(
+        &mut self,
+        addr: SocketAddr,
+        id: u16,
+        error: UpdateError,
+    ) -> Option<SocketAddr> {
+        info!("Removing peer {}, {}: {} while updating", addr, id, error);
+        if let Some(info_hash) = self.addr_to_info_hash.remove(&(addr, id)) {
+            if let Some(torrent_data) = self.torrents.get_mut(&info_hash) {
+                torrent_data.peers_data.disconnected_utp(addr, id);
+            }
+        }
+        if let Some(_connection) = self.utp_connections.remove(&(addr, id)) {
+            return Some(addr);
+        }
+        None
+    }
+
     pub fn add_peers(&mut self, info_hash: Sha1Hash, peer_list: PeerInfoList) {
         let torrent = if let Some(torrent) = self.torrents.get_mut(&info_hash) {
             torrent
@@ -590,23 +722,28 @@ impl ConnectionManager {
                     .insert(token, Connection::Handshaking(peer));
             } else {
                 // Utp connection
-                let (peer, connection_id) = match OutgoingUtpConnection::new(
-                    UtpSocket::new(self.utp_socket.clone(), peer_info.addr),
+                let mut connection = OutgoingUtpConnection::new(
+                    UtpConnectionInfo::new(peer_info.addr),
                     torrent.info_hash,
                     self.peer_id,
+                );
+                self.utp_send_buffer.add_header(Type::StSyn);
+                let connection_id = connection.socket.conn_id_recv;
+                if let Err(error) = self.utp_send_buffer.send(
+                    &mut self.utp_block_sender,
+                    &self.utp_socket,
+                    &mut connection.socket,
                 ) {
-                    Ok(peer) => {
-                        let connection_id = peer.socket.conn_id_recv;
-                        (UtpConnection::Outgoing(peer), connection_id)
-                    }
-                    Err(error) => {
-                        warn!("Failed to connect to peer: {:?}", error);
-                        continue;
-                    }
-                };
-                // TODO torrent.peers_data.connected(token, peer_info.clone());
-                self.utp_connections
-                    .insert((peer_info.addr, connection_id), peer);
+                    warn!("Failed to connect to peer: {:?}", error);
+                    continue;
+                }
+                torrent
+                    .peers_data
+                    .connected_utp(connection_id, peer_info.clone());
+                self.utp_connections.insert(
+                    (peer_info.addr, connection_id),
+                    UtpConnection::Outgoing(connection),
+                );
             }
         }
     }
@@ -709,7 +846,7 @@ impl ConnectionManager {
                     self.utp_connections.get_mut(&(addr, conn_id)) else {return};
 
                 let utp_header = conn.get_utp_header();
-                match self.utp_block_sender.send(
+                match self.utp_block_sender.send_block(
                     utp_header,
                     self.utp_socket.as_ref(),
                     1000,

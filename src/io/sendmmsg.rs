@@ -4,7 +4,7 @@ use std::os::fd::AsRawFd;
 use mio::net::UdpSocket;
 use write_to::WriteTo;
 
-use super::msghdr_x;
+use super::MsghdrX;
 use crate::client::utp::Header;
 use crate::common::BLOCK_LENGTH;
 use crate::io::socketaddr_to_raw;
@@ -43,7 +43,7 @@ pub fn sendmmsg(
     // Solve for N and you get:
     let num_packets = (block.block.len() + 13).div_ceil(packet_size - 20);
     // TODO: these alloc.  Put all this in a struct so that we can reuse them
-    let mut msghdr_xs = vec![msghdr_x::default(); num_packets];
+    let mut msghdr_xs = vec![MsghdrX::default(); num_packets];
     let mut aux_data = vec![
         (
             [libc::iovec {
@@ -95,7 +95,7 @@ pub fn sendmmsg(
             SYS_SENDMSG_X as _,
             socket.as_raw_fd() as usize,
             msghdr_xs.as_mut_ptr() as usize,
-            msghdr_xs.len() as usize,
+            msghdr_xs.len(),
             0,
         )
     };
@@ -106,8 +106,9 @@ pub fn sendmmsg(
 }
 
 pub struct UtpBlockSender {
-    msghdr_xs: Vec<msghdr_x>,
+    msghdr_xs: Vec<MsghdrX>,
     aux_data: Vec<AuxData>,
+    high_watermark: usize,
 }
 
 #[derive(Clone)]
@@ -148,28 +149,62 @@ impl UtpBlockSender {
 
     pub fn new() -> Self {
         let num_packets = (BLOCK_LENGTH + 13).div_ceil(Self::DEFAULT_PACKET_SIZE - 20);
+        let msghdr_xs = vec![MsghdrX::default(); num_packets];
+        let aux_data = vec![AuxData::default(); num_packets];
         Self {
-            msghdr_xs: Vec::with_capacity(num_packets),
-            aux_data: Vec::with_capacity(num_packets),
+            msghdr_xs,
+            aux_data,
+            high_watermark: num_packets,
         }
     }
 
     pub fn send(
         &mut self,
-        mut utp_header: Header,
+        utp_header: Header,
+        socket: &UdpSocket,
+        packet_size: usize,
+        data: &mut [u8],
+        addr: SocketAddr,
+    ) -> std::io::Result<usize> {
+        self.send_internal(utp_header, socket, packet_size, data, addr, None)
+    }
+
+    pub fn send_block(
+        &mut self,
+        utp_header: Header,
         socket: &UdpSocket,
         packet_size: usize,
         mut block: Block,
         addr: SocketAddr,
     ) -> std::io::Result<usize> {
-        let num_packets = (block.block.len() + 13).div_ceil(packet_size - 20);
-        self.msghdr_xs.resize(num_packets, msghdr_x::default());
-        self.aux_data.resize(num_packets, AuxData::default());
-        let (mut sockaddr_in, sockaddr_len) = socketaddr_to_raw(addr);
-        // Set first packet
         let block_prefix = block.prefix();
-        self.aux_data[0].header_buffer.buffer[20..].copy_from_slice(&block_prefix);
-        self.aux_data[0].header_buffer.length = Header::SIZE + block_prefix.len();
+        self.send_internal(
+            utp_header,
+            socket,
+            packet_size,
+            &mut block.block,
+            addr,
+            Some(&block_prefix),
+        )
+    }
+
+    fn send_internal(
+        &mut self,
+        mut utp_header: Header,
+        socket: &UdpSocket,
+        packet_size: usize,
+        data: &mut [u8],
+        addr: SocketAddr,
+        prefix: Option<&[u8]>,
+    ) -> std::io::Result<usize> {
+        let prefix_len = prefix.map_or(0, |x| x.len());
+        let num_packets = (data.len() + prefix_len).div_ceil(packet_size - 20);
+        self.resize(num_packets);
+        let (mut sockaddr_in, sockaddr_len) = socketaddr_to_raw(addr);
+        if let Some(prefix) = prefix {
+            self.aux_data[0].header_buffer.buffer[20..].copy_from_slice(prefix);
+            self.aux_data[0].header_buffer.length = Header::SIZE + prefix_len;
+        }
         let mut current_index = 0;
         for (
             c_struct,
@@ -187,15 +222,16 @@ impl UtpBlockSender {
                 .write_to(&mut (*header_buffer).as_mut_slice())
                 .unwrap();
             utp_header.seq_nr += 1;
+            // Either send the max size we can fit into packet_size or the remaining data.
             let block_len_sent =
-                std::cmp::min(packet_size - *header_len, block.block.len() - current_index);
+                std::cmp::min(packet_size - *header_len, data.len() - current_index);
             *iovecs = [
                 libc::iovec {
                     iov_base: header_buffer.as_mut_ptr() as _,
                     iov_len: *header_len,
                 },
                 libc::iovec {
-                    iov_base: unsafe { block.block.as_mut_ptr().add(current_index) as _ },
+                    iov_base: unsafe { data.as_mut_ptr().add(current_index) as _ },
                     iov_len: block_len_sent,
                 },
             ];
@@ -210,7 +246,7 @@ impl UtpBlockSender {
                 SYS_SENDMSG_X as _,
                 socket.as_raw_fd() as usize,
                 self.msghdr_xs.as_mut_ptr() as usize,
-                self.msghdr_xs.len() as usize,
+                self.msghdr_xs.len(),
                 0,
             )
         };
@@ -221,5 +257,20 @@ impl UtpBlockSender {
             return Err(std::io::ErrorKind::UnexpectedEof.into());
         }
         Ok(num_packets_sent as _)
+    }
+
+    fn resize(&mut self, new_len: usize) {
+        if new_len <= self.high_watermark {
+            unsafe {
+                // This is safe because these values have been previously initiallized,
+                // and we will be overwriting them immediately.
+                self.msghdr_xs.set_len(new_len);
+                self.aux_data.set_len(new_len);
+            }
+        } else {
+            self.msghdr_xs.resize(new_len, MsghdrX::default());
+            self.aux_data.resize(new_len, AuxData::default());
+            self.high_watermark = new_len
+        }
     }
 }

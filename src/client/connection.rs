@@ -1,4 +1,3 @@
-// use super::initiating_connection::InitiatingConnection;
 use super::EstablishedConnection;
 use super::HandshakingConnection;
 use super::NetworkSource;
@@ -6,7 +5,6 @@ use crate::common::Sha1Hash;
 use crate::io::ReadBuffer;
 
 pub enum Connection {
-    // Initiating(InitiatingConnection), // UDP only
     Handshaking(HandshakingConnection),
     Established(EstablishedConnection),
 }
@@ -16,7 +14,6 @@ impl Connection {
         match self {
             Connection::Handshaking(c) => c.into_network_source(),
             Connection::Established(c) => c.into_network_source(),
-            // Connection::Initiating(_) => todo!(),
         }
     }
 }
@@ -66,6 +63,18 @@ impl std::fmt::Display for UpdateError {
 impl From<std::io::Error> for UpdateError {
     fn from(error: std::io::Error) -> Self {
         UpdateError::CommunicationError(error)
+    }
+}
+
+impl From<std::io::ErrorKind> for UpdateError {
+    fn from(error: std::io::ErrorKind) -> Self {
+        UpdateError::CommunicationError(error.into())
+    }
+}
+
+impl From<&std::io::Error> for UpdateError {
+    fn from(error: &std::io::Error) -> Self {
+        UpdateError::GeneralError(anyhow::Error::msg(format!("{error:?}")))
     }
 }
 
