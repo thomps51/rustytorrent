@@ -40,6 +40,7 @@ pub fn recvmmsg<const N: usize>(
     Ok((num_packets_received as _, result_addr))
 }
 
+#[derive(Default)]
 pub struct UtpReceiver {
     recv_buffers: Vec<ReadBuffer>,
     inner: Vec<MsghdrX>,
@@ -105,7 +106,7 @@ impl UtpReceiver {
     pub fn recv(
         &mut self,
         socket: &UdpSocket,
-    ) -> std::io::Result<impl Iterator<Item = PacketData<'_>> + '_> {
+    ) -> std::io::Result<(usize, impl Iterator<Item = PacketData<'_>> + '_)> {
         let num_packets_received = unsafe {
             libc::syscall(
                 SYS_RECVMSG_X as _,
@@ -118,19 +119,21 @@ impl UtpReceiver {
         if num_packets_received < 0 {
             return Err(std::io::Error::last_os_error());
         }
-        Ok(self
-            .recv_buffers
-            .iter_mut()
-            .zip(self.inner.iter())
-            .take(num_packets_received as _)
-            .map(|(result_buffer, c_struct)| {
-                result_buffer.added_unused(c_struct.msg_datalen);
-                let addr = raw_to_socketaddr(c_struct.msg_name, c_struct.msg_namelen);
-                PacketData {
-                    buffer: result_buffer,
-                    addr,
-                }
-            }))
+        Ok((
+            num_packets_received as _,
+            self.recv_buffers
+                .iter_mut()
+                .zip(self.inner.iter())
+                .take(num_packets_received as _)
+                .map(|(result_buffer, c_struct)| {
+                    result_buffer.added_unused(c_struct.msg_datalen);
+                    let addr = raw_to_socketaddr(c_struct.msg_name, c_struct.msg_namelen);
+                    PacketData {
+                        buffer: result_buffer,
+                        addr,
+                    }
+                }),
+        ))
     }
 }
 

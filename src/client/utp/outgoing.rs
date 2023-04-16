@@ -1,4 +1,4 @@
-use crate::client::utp::socket::UtpConnectionInfo;
+use crate::client::utp::connection_info::UtpConnectionInfo;
 use crate::client::utp::{HandshakingUpdateSuccess, Type};
 use crate::client::UpdateError;
 use crate::common::Sha1Hash;

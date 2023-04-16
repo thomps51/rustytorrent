@@ -390,21 +390,22 @@ impl EstablishedUtpConnection {
             .unwrap();
     }
 
-    fn send_block_requests(&mut self, send_buffer: &mut UtpSendBuffer) -> UpdateResult {
+    fn send_block_requests(&mut self, send_buffer: &mut UtpSendBuffer) -> UpdateSuccess {
         if !self.peer_choking {
             debug!("Peer is not choking");
-            let sent =
-                self.block_manager
-                    .send_block_requests(send_buffer, &self.peer_has, self.id)?;
+            let sent = self
+                .block_manager
+                .send_block_requests(send_buffer, &self.peer_has, self.id)
+                .expect("write to send_buffer never fails");
             if sent == 0 {
                 debug!("No block requests sent");
-                return Ok(UpdateSuccess::NoUpdate);
+                return UpdateSuccess::NoUpdate;
             }
-            return Ok(UpdateSuccess::Success);
+            return UpdateSuccess::Success;
         } else {
             info!("Peer is choking");
         }
-        Ok(UpdateSuccess::NoUpdate)
+        UpdateSuccess::NoUpdate
     }
 }
 
@@ -419,6 +420,7 @@ impl EstablishedUtpConnection {
             // ACK
             return Ok(UpdateSuccess::NoUpdate);
         }
+        // TODO: Handle ST_FIN specifically
         if header.get_type() != Type::StData {
             return Err(UpdateError::CommunicationError(
                 std::io::ErrorKind::InvalidData.into(),
@@ -444,7 +446,7 @@ impl EstablishedUtpConnection {
                     return Ok(read_result);
                 }
                 debug!("Connection {} sending block requests", self.id);
-                let request_result = self.send_block_requests(send_buffer)?;
+                let request_result = self.send_block_requests(send_buffer);
                 match (&read_result, request_result) {
                     (UpdateSuccess::NoUpdate, UpdateSuccess::NoUpdate) => {
                         Ok(UpdateSuccess::NoUpdate)

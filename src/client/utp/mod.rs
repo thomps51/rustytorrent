@@ -7,14 +7,16 @@ pub use incoming::*;
 pub mod outgoing;
 pub use outgoing::*;
 
-pub mod socket;
-pub use socket::*;
+pub mod connection_info;
+pub use connection_info::*;
 
 pub mod established;
 pub use established::*;
 
 pub mod send_buffer;
 pub use send_buffer::*;
+
+pub mod connection_manager;
 
 use crate::{io::ReadBuffer, messages::Handshake};
 

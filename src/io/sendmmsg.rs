@@ -105,6 +105,7 @@ pub fn sendmmsg(
     Ok(num_packets_sent as _)
 }
 
+#[derive(Default)]
 pub struct UtpBlockSender {
     msghdr_xs: Vec<MsghdrX>,
     aux_data: Vec<AuxData>,

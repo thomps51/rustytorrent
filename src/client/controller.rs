@@ -205,12 +205,11 @@ impl Controller {
                     );
                 }
                 DiskResponse::RequestCompleted {
-                    info_hash,
+                    info_hash: _,
                     conn_id,
                     block,
                 } => {
-                    self.connection_manager
-                        .send_block(info_hash, conn_id, block);
+                    self.connection_manager.send_block(conn_id, block);
                 }
                 DiskResponse::WritePieceCompleted {
                     info_hash,
@@ -273,6 +272,8 @@ impl Controller {
             }
             for event in &events {
                 // if event is_writable, that means it is an outgoing TCP connection that is now connected
+                // TODO: can I fold this in to normal updates and not use is_writable (save that for TCP pushback?).
+                // Maybe by having a separate connection type for outgoing connections like I do in UTP?
                 if event.is_writable() {
                     let token = event.token();
                     self.connection_manager.reregister_connected(token);
