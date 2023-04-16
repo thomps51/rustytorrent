@@ -2,7 +2,6 @@ use std::collections::BTreeMap;
 use std::io::{self, Read, Write};
 use std::sync::mpsc::Sender;
 
-use crate::client::connection_manager::UtpSendBuffer;
 use crate::client::disk_manager::{ConnectionIdentifier, DiskRequest};
 use crate::client::{BlockManager, UpdateError, UpdateResult};
 use crate::common::BLOCK_LENGTH;
@@ -22,7 +21,7 @@ use log::debug;
 use log::info;
 use write_to::ReadFrom;
 
-use super::{Header, Type, UtpConnectionInfo};
+use super::{Header, Type, UtpConnectionInfo, UtpSendBuffer};
 
 pub struct EstablishedUtpConnection {
     pub info_hash: Sha1Hash,

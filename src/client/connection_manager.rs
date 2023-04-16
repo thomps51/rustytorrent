@@ -1,13 +1,12 @@
 use rand::{distributions::Alphanumeric, Rng};
 use rccell::RcCell;
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::convert::TryInto;
-use std::io::Write;
 use std::iter::FromIterator;
 use std::rc::Rc;
 use std::sync::mpsc::Sender;
-use write_to::{ReadFrom, WriteTo};
+use write_to::ReadFrom;
 
 use bit_vec::BitVec;
 use log::{debug, info, warn};
@@ -17,9 +16,10 @@ use std::net::SocketAddr;
 
 use super::block_cache::BlockCache;
 use super::disk_manager::{ConnectionIdentifier, DiskRequest};
+use super::peers_data::PeersData;
 use super::piece_info::PieceInfo;
 use super::tracker_manager::TrackerRequest;
-use super::utp::Type;
+use super::utp::{Type, UtpSendBuffer};
 use super::{piece_assigner::PieceAssigner, HandshakingConnection};
 use super::{
     Connection, EstablishedConnection, HandshakeUpdateSuccess, UpdateError, UpdateSuccess,
@@ -35,98 +35,33 @@ use crate::common::{Sha1Hash, SharedPieceAssigner};
 use crate::io::recvmmsg::{PacketData, UtpReceiver};
 use crate::io::sendmmsg::UtpBlockSender;
 use crate::io::ReadBuffer;
-use crate::messages::{Bitfield, Block, Handshake, Have, Interested, ProtocolMessage, Unchoke};
-use crate::tracker::{EventKind, PeerInfo, PeerInfoList};
+use crate::messages::{Bitfield, Block, Handshake, Have, Interested, Unchoke};
+use crate::tracker::{EventKind, PeerInfoList};
 
 const PRINT_UPDATE_TIME: std::time::Duration = std::time::Duration::from_secs(1);
 
 pub struct ConnectionManager {
-    connections: HashMap<Token, Connection>,
     downloaded: usize,
     uploaded: usize,
     last_update: std::time::Instant,
     next_socket_index: usize,
     torrents: HashMap<Sha1Hash, TorrentData>,
     config: ConnectionManagerConfig,
-    listener: TcpListener,
     peer_id: [u8; PEER_ID_LENGTH],
     tracker_sender: Sender<TrackerRequest>,
-    token_to_info_hash: HashMap<Token, Sha1Hash>,
-    addr_to_info_hash: HashMap<(SocketAddr, u16), Sha1Hash>,
-    read_buffer: ReadBuffer,
-    utp_send_buffer: UtpSendBuffer,
     poll: RcCell<Poll>,
-    utp_socket: Rc<UdpSocket>,
+    // tcp things
+    read_buffer: ReadBuffer,
+    token_to_info_hash: HashMap<Token, Sha1Hash>,
+    listener: TcpListener,
+    connections: HashMap<Token, Connection>,
+    // Utp things
+    addr_to_info_hash: HashMap<(SocketAddr, u16), Sha1Hash>,
+    utp_send_buffer: UtpSendBuffer,
+    utp_socket: UdpSocket,
     utp_connections: HashMap<(SocketAddr, u16), UtpConnection>,
     utp_block_sender: UtpBlockSender,
     utp_receiver: UtpReceiver,
-}
-
-#[derive(Default)]
-pub struct UtpSendBuffer {
-    data_buffer: Vec<u8>,
-    header_only: Vec<Type>,
-    header_buffer: [u8; Header::SIZE],
-}
-
-impl UtpSendBuffer {
-    pub fn add_message<T: ProtocolMessage>(&mut self, message: T) {
-        message
-            .write(&mut self.data_buffer)
-            .expect("vec write can't fail");
-    }
-
-    pub fn add_data<T: WriteTo>(&mut self, data: T) {
-        data.write_to(&mut self.data_buffer)
-            .expect("vec write can't fail");
-    }
-
-    pub fn add_header(&mut self, header: Type) {
-        self.header_only.push(header);
-    }
-
-    pub fn send(
-        &mut self,
-        utp_sender: &mut UtpBlockSender,
-        socket: &UdpSocket,
-        conn_info: &mut UtpConnectionInfo,
-    ) -> std::io::Result<()> {
-        for header_type in self.header_only.drain(..) {
-            let header = conn_info.create_header(header_type);
-            header
-                .write_to(&mut self.header_buffer.as_mut_slice())
-                .unwrap();
-            socket.send_to(&self.header_buffer, conn_info.addr())?;
-        }
-        if self.data_buffer.is_empty() {
-            return Ok(());
-        }
-        let header = conn_info.create_header(Type::StData);
-        // TODO: get packet size from conn_info
-        let sent = utp_sender.send(
-            header,
-            socket,
-            1000,
-            &mut self.data_buffer,
-            conn_info.addr(),
-        )?;
-        self.data_buffer.clear();
-        // sent - 1 because create_header adds one (TODO: This smells)
-        let value = conn_info.seq_nr.wrapping_add((sent - 1) as u16);
-        conn_info.seq_nr = value;
-        Ok(())
-    }
-}
-
-impl Write for UtpSendBuffer {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.data_buffer.extend_from_slice(buf);
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
 }
 
 pub struct ConnectionManagerConfig {
@@ -146,97 +81,6 @@ pub struct TorrentData {
     have_on_disk: BitVec,
     disk_requester: Sender<DiskRequest>,
     peers_data: PeersData,
-}
-
-// Token to info_hash map
-
-#[derive(Default)]
-pub struct PeersData {
-    connected_id: HashSet<[u8; PEER_ID_LENGTH]>,
-    token_to_info: HashMap<Token, PeerInfo>,
-    utp_connected: HashMap<(SocketAddr, u16), [u8; PEER_ID_LENGTH]>,
-    connected_socketaddr: HashSet<SocketAddr>,
-    unconnected: Vec<PeerInfo>,
-}
-
-// Need to query by both Token and PeerId
-// iter connections?  Shared ptr to connections?  Replace connections in manager with something like this?
-impl PeersData {
-    pub fn add_peers_from_tracker(&mut self, peers: Vec<PeerInfo>) {
-        for peer in peers {
-            if let Some(id) = peer.id {
-                if !self.connected_id.contains(&id) {
-                    self.unconnected.push(peer);
-                }
-            } else if !self.connected_socketaddr.contains(&peer.addr) {
-                self.unconnected.push(peer);
-            }
-        }
-    }
-
-    pub fn add_connected_id(&mut self, token: Token, id: [u8; PEER_ID_LENGTH], addr: SocketAddr) {
-        let peer_info = self
-            .token_to_info
-            .entry(token)
-            .or_insert(PeerInfo { addr, id: None });
-        peer_info.id = Some(id);
-        self.connected_id.insert(id);
-    }
-
-    pub fn add_connected_id_utp(
-        &mut self,
-        connection_id: u16,
-        id: [u8; PEER_ID_LENGTH],
-        addr: SocketAddr,
-    ) {
-        self.connected_id.insert(id);
-        self.utp_connected.insert((addr, connection_id), id);
-    }
-
-    pub fn get_unconnected(&mut self, amount: usize) -> Vec<PeerInfo> {
-        let drain_amount = std::cmp::min(amount, self.unconnected.len());
-        self.unconnected.drain(..drain_amount).collect()
-    }
-
-    pub fn have_unconnected(&self) -> bool {
-        !self.unconnected.is_empty()
-    }
-
-    pub fn is_connected(&self, peer_id: &[u8; PEER_ID_LENGTH]) -> bool {
-        self.connected_id.contains(peer_id)
-    }
-
-    pub fn connected(&mut self, token: Token, peer_info: PeerInfo) {
-        if let Some(id) = peer_info.id {
-            self.connected_id.insert(id);
-        }
-        self.connected_socketaddr.insert(peer_info.addr);
-        self.token_to_info.insert(token, peer_info);
-    }
-
-    pub fn connected_utp(&mut self, _id: u16, peer_info: PeerInfo) {
-        if let Some(id) = peer_info.id {
-            self.connected_id.insert(id);
-        }
-        self.connected_socketaddr.insert(peer_info.addr);
-    }
-
-    pub fn disconnected(&mut self, token: Token) {
-        let PeerInfo { addr, id } = self.token_to_info[&token];
-        if let Some(id) = id {
-            self.connected_id.remove(&id);
-        }
-        self.connected_socketaddr.remove(&addr);
-        self.token_to_info.remove(&token);
-    }
-
-    pub fn disconnected_utp(&mut self, addr: SocketAddr, id: u16) {
-        let id = self.utp_connected.remove(&(addr, id));
-        if let Some(id) = id {
-            self.connected_id.remove(&id);
-        }
-        self.connected_socketaddr.remove(&addr);
-    }
 }
 
 impl ConnectionManager {
@@ -275,7 +119,7 @@ impl ConnectionManager {
             token_to_info_hash: HashMap::new(),
             read_buffer: ReadBuffer::new(1 << 20), // 1 MiB
             poll,
-            utp_socket: Rc::new(utp_socket),
+            utp_socket,
             utp_connections: HashMap::new(),
             addr_to_info_hash: HashMap::new(),
             utp_block_sender: UtpBlockSender::new(),
@@ -828,17 +672,9 @@ impl ConnectionManager {
     ) {
         match conn_id {
             ConnectionIdentifier::TcpToken(token) => {
-                let error = if let Some(Connection::Established(connection)) =
-                    self.connections.get_mut(&token)
-                {
-                    if let Err(error) = connection.send(&block) {
-                        error
-                    } else {
-                        return;
-                    }
-                } else {
-                    return;
-                };
+                let Some(Connection::Established(connection)) =
+                    self.connections.get_mut(&token) else {return};
+                let Err(error) = connection.send(&block) else {return};
                 self.disconnect_peer(token, error.into());
             }
             ConnectionIdentifier::UtpId(addr, conn_id) => {
@@ -848,7 +684,7 @@ impl ConnectionManager {
                 let utp_header = conn.get_utp_header();
                 match self.utp_block_sender.send_block(
                     utp_header,
-                    self.utp_socket.as_ref(),
+                    &self.utp_socket,
                     1000,
                     block,
                     addr,

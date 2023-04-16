@@ -13,9 +13,12 @@ pub use socket::*;
 pub mod established;
 pub use established::*;
 
+pub mod send_buffer;
+pub use send_buffer::*;
+
 use crate::{io::ReadBuffer, messages::Handshake};
 
-use super::{connection_manager::UtpSendBuffer, UpdateError, UpdateSuccess};
+use super::{UpdateError, UpdateSuccess};
 
 #[derive(Default)]
 pub enum HandshakingUpdateSuccess {

@@ -1,4 +1,3 @@
-use crate::client::connection_manager::UtpSendBuffer;
 use crate::client::utp::socket::UtpConnectionInfo;
 use crate::client::utp::{HandshakingUpdateSuccess, Type};
 use crate::client::UpdateError;
@@ -6,7 +5,7 @@ use crate::common::Sha1Hash;
 use crate::{common::PEER_ID_LENGTH, messages::Handshake};
 use log::debug;
 
-use super::Header;
+use super::{Header, UtpSendBuffer};
 
 #[derive(Debug)]
 pub enum OutgoingUtpState {

@@ -25,6 +25,7 @@ pub mod piece_assigner;
 pub mod block_cache;
 
 // pub mod initiating_connection;
+pub mod peers_data;
 pub mod tracker_manager;
 pub mod utp;
 
