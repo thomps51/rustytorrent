@@ -271,22 +271,8 @@ impl Controller {
                 debug!("events: {:?}", events);
             }
             for event in &events {
-                // if event is_writable, that means it is an outgoing TCP connection that is now connected
-                // TODO: can I fold this in to normal updates and not use is_writable (save that for TCP pushback?).
-                // Maybe by having a separate connection type for outgoing connections like I do in UTP?
-                if event.is_writable() {
-                    let token = event.token();
-                    self.connection_manager.reregister_connected(token);
-                    if let Err(error) = self.connection_manager.handle_event_inner(token) {
-                        let addr = self.connection_manager.disconnect_peer(token, error);
-                        if let Some(_addr) = addr {
-                            // Try UDP connection
-                        }
-                    }
-                    continue;
-                }
                 match event.token() {
-                    TCP_LISTENER => self.connection_manager.accept_connections(),
+                    TCP_LISTENER => self.connection_manager.accept_tcp_connections(),
                     DISK_MESSAGE => self.handle_disk_message(),
                     TRACKER_MESSAGE => self.handle_tracker_message(),
                     STOP_MESSAGE => break 'outer,

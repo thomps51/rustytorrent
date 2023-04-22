@@ -23,7 +23,7 @@ use crate::{
 
 pub type AllocatedFiles = HashMap<PathBuf, fs::File>;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Eq, Hash, PartialEq)]
 pub enum ConnectionIdentifier {
     TcpToken(Token),
     UtpId(SocketAddr, u16),

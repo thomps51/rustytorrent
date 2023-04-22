@@ -3,20 +3,15 @@ use std::io::{self, Read, Write};
 use std::sync::mpsc::Sender;
 
 use crate::client::disk_manager::{ConnectionIdentifier, DiskRequest};
-use crate::client::{BlockManager, UpdateError, UpdateResult};
+use crate::client::{dispatch_message, BlockManager, PeerData, UpdateError, UpdateResult};
 use crate::common::BLOCK_LENGTH;
-use crate::messages::protocol_message::HasId;
 use crate::{
     client::UpdateSuccess,
     common::{Sha1Hash, SharedBlockCache, SharedCount, SharedPieceAssigner},
     io::ReadBuffer,
-    messages::{
-        read_byte, Bitfield, Block, Cancel, Choke, Have, Interested, NotInterested, Port, Request,
-        Unchoke,
-    },
+    messages::{read_byte, Block},
 };
 use anyhow::Context;
-use bit_vec::BitVec;
 use log::debug;
 use log::info;
 use write_to::ReadFrom;
@@ -27,19 +22,14 @@ pub struct EstablishedUtpConnection {
     pub info_hash: Sha1Hash,
     pub am_choking: bool,
     pub am_interested: bool,
-    pub id: usize,
-    peer_choking: bool,
-    peer_interested: bool,
-    peer_has: BitVec,
+    pub id: ConnectionIdentifier,
+    peer_data: PeerData,
     pub(crate) stream: UtpConnectionInfo,
     last_keep_alive: std::time::Instant,
     block_manager: BlockManager,
-    pending_peer_cancels: Vec<Cancel>,
-    num_pieces: usize,
     state: State,
     pub downloaded: SharedCount,
     pub uploaded: SharedCount,
-    disk_requester: Sender<DiskRequest>,
     current_block: BlockInFlight,
     next_sequence_number: u16,
     out_of_order: BTreeMap<u16, Vec<u8>>, // seq_nr to data
@@ -136,7 +126,7 @@ impl BlockInFlight {
 
 impl EstablishedUtpConnection {
     pub fn new(
-        id: usize,
+        id: ConnectionIdentifier,
         info_hash: Sha1Hash,
         stream: UtpConnectionInfo,
         num_pieces: usize,
@@ -152,18 +142,13 @@ impl EstablishedUtpConnection {
             am_choking: true,
             am_interested: false,
             id,
-            peer_choking: true,
-            peer_interested: false,
-            peer_has: BitVec::from_elem(num_pieces, false),
+            peer_data: PeerData::new(id, disk_requester, info_hash, num_pieces),
             stream,
             last_keep_alive: std::time::Instant::now(),
             block_manager: BlockManager::new(piece_assigner, block_cache),
-            pending_peer_cancels: Vec::new(),
-            num_pieces,
             state: State::ConnectedNormal,
             downloaded,
             uploaded,
-            disk_requester,
             current_block: BlockInFlight::new(),
             next_sequence_number,
             out_of_order: BTreeMap::new(),
@@ -278,7 +263,7 @@ impl EstablishedUtpConnection {
         let id = read_byte(read_buffer).context("Reading message ID")?;
         let length = length - ID_BYTE_SIZE;
         let packet_data_length = packet_data_length - LENGTH_BYTE_SIZE - ID_BYTE_SIZE;
-        let mut update_block = || -> UpdateResult {
+        let update_block = |read_buffer: &mut ReadBuffer| -> UpdateResult {
             debug!("update_block");
             if read_buffer.unread() < 8 {
                 debug!("incompleete block");
@@ -304,59 +289,7 @@ impl EstablishedUtpConnection {
             }
             Ok(UpdateSuccess::Success)
         };
-        macro_rules! dispatch_message2 (
-            ($($A:ident => [$msg:ident] $B:block),*) => (
-                match id {
-                    Block::ID => {
-                        update_block()
-                    },
-                    $($A::ID => {
-                        use write_to::Name;
-                        debug!("Reading {} message", $A::NAME);
-                        let ($msg, length) = $A::read_from(read_buffer, length).context("Reading message")?;
-                        debug!("Received {:?}", $msg);
-                        assert_eq!(length, 0); // Not necessarily true in UTP? Only seems to happen with Blocks?
-                        $B;
-                        Ok(UpdateSuccess::Success)
-                    })*
-                    _ => Err(UpdateError::UnknownMessage{id}),
-                }
-            );
-        );
-        let retval = dispatch_message2!(
-            Choke => [_msg] {
-                self.peer_choking = true;
-            },
-            Unchoke => [_msg] {
-                self.peer_choking = false;
-            },
-            Interested => [_msg] {
-                self.peer_interested = true;
-            },
-            NotInterested => [_msg] {
-                self.peer_interested = false;
-            },
-            Have => [msg] {
-                if msg.index as usize >= self.peer_has.len() {
-                    return Err(UpdateError::IndexOutOfBounds);
-                }
-                self.peer_has.set(msg.index as usize, true);
-            },
-            Bitfield => [msg] {
-                self.peer_has = msg.bitfield;
-                // Bitvec needs to be truncated since it contains padding
-                self.peer_has.truncate(self.num_pieces);
-            },
-            Request => [msg] {
-                self.send_disk_request(msg);
-            },
-            Cancel => [msg] {
-                self.pending_peer_cancels.push(msg);
-            },
-            Port => [_msg] {
-                // Simple ack, DHT not implemented
-            }
-        );
+        let retval = dispatch_message(read_buffer, length, id, &mut self.peer_data, update_block);
         *self.downloaded.borrow_mut() += total_read;
         match retval {
             Ok(UpdateSuccess::Success) => Ok(UpdateSuccess::Transferred {
@@ -380,22 +313,12 @@ impl EstablishedUtpConnection {
         self.stream.seq_nr = value;
     }
 
-    pub fn send_disk_request(&self, request: Request) {
-        self.disk_requester
-            .send(DiskRequest::Request {
-                info_hash: self.info_hash,
-                conn_id: ConnectionIdentifier::UtpId(self.stream.addr(), self.stream.conn_id_recv),
-                request,
-            })
-            .unwrap();
-    }
-
     fn send_block_requests(&mut self, send_buffer: &mut UtpSendBuffer) -> UpdateSuccess {
-        if !self.peer_choking {
+        if !self.peer_data.peer_choking {
             debug!("Peer is not choking");
             let sent = self
                 .block_manager
-                .send_block_requests(send_buffer, &self.peer_has, self.id)
+                .send_block_requests(send_buffer, &self.peer_data.peer_has, self.id)
                 .expect("write to send_buffer never fails");
             if sent == 0 {
                 debug!("No block requests sent");
@@ -445,7 +368,7 @@ impl EstablishedUtpConnection {
                     self.state = State::Seeding;
                     return Ok(read_result);
                 }
-                debug!("Connection {} sending block requests", self.id);
+                debug!("Connection {:?} sending block requests", self.id);
                 let request_result = self.send_block_requests(send_buffer);
                 match (&read_result, request_result) {
                     (UpdateSuccess::NoUpdate, UpdateSuccess::NoUpdate) => {

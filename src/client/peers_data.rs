@@ -11,7 +11,7 @@ use crate::{common::PEER_ID_LENGTH, tracker::PeerInfo};
 pub struct PeersData {
     connected_id: HashSet<[u8; PEER_ID_LENGTH]>,
     pub token_to_info: HashMap<Token, PeerInfo>,
-    utp_connected: HashMap<(SocketAddr, u16), [u8; PEER_ID_LENGTH]>,
+    pub utp_connected: HashMap<(SocketAddr, u16), [u8; PEER_ID_LENGTH]>,
     connected_socketaddr: HashSet<SocketAddr>,
     unconnected: Vec<PeerInfo>,
 }

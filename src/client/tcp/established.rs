@@ -1,28 +1,26 @@
-use std::io::prelude::*;
-use std::sync::mpsc::Sender;
+use std::{io::Write, sync::mpsc::Sender};
 
-use bit_vec::BitVec;
 use log::{debug, info};
-use mio::Token;
 
-use super::block_manager::BlockManager;
-use super::disk_manager::{ConnectionIdentifier, DiskRequest};
-use super::{ConnectionBase, NetworkSource, UpdateError, UpdateResult, UpdateSuccess};
-use crate::common::{Sha1Hash, SharedBlockCache, SharedCount, SharedPieceAssigner};
-use crate::io::ReadBuffer;
-use crate::messages::protocol_message::HasId;
+use crate::{
+    client::{
+        disk_manager::{ConnectionIdentifier, DiskRequest},
+        dispatch_message, BlockManager, NetworkSource, PeerData, UpdateResult, UpdateSuccess,
+    },
+    common::{Sha1Hash, SharedBlockCache, SharedCount, SharedPieceAssigner},
+    io::ReadBuffer,
+    messages::*,
+};
+
+use super::ConnectionBase;
 use crate::messages::ProtocolMessage;
-use crate::messages::*;
 use write_to::ReadFrom;
 
 pub struct EstablishedConnection {
     pub info_hash: Sha1Hash,
     pub am_choking: bool,
     pub am_interested: bool,
-    pub id: usize,
-    pub peer_choking: bool,
-    pub peer_interested: bool,
-    pub peer_has: BitVec,
+    pub id: ConnectionIdentifier,
     stream: NetworkSource,
     last_keep_alive: std::time::Instant,
     block_manager: BlockManager,
@@ -34,7 +32,7 @@ pub struct EstablishedConnection {
     state: State,
     pub downloaded: SharedCount,
     pub uploaded: SharedCount,
-    disk_requester: Sender<DiskRequest>,
+    pub peer_data: PeerData,
 }
 
 pub enum State {
@@ -45,7 +43,7 @@ pub enum State {
 
 impl EstablishedConnection {
     pub fn new(
-        id: usize,
+        id: ConnectionIdentifier,
         info_hash: Sha1Hash,
         stream: NetworkSource,
         num_pieces: usize,
@@ -60,9 +58,6 @@ impl EstablishedConnection {
             am_choking: true,
             am_interested: false,
             id,
-            peer_choking: true,
-            peer_interested: false,
-            peer_has: BitVec::from_elem(num_pieces, false),
             stream,
             last_keep_alive: std::time::Instant::now(),
             block_manager: BlockManager::new(piece_assigner, block_cache),
@@ -74,7 +69,7 @@ impl EstablishedConnection {
             state: State::ConnectedNormal,
             downloaded,
             uploaded,
-            disk_requester,
+            peer_data: PeerData::new(id, disk_requester, info_hash, num_pieces),
         }
     }
 
@@ -107,32 +102,9 @@ impl EstablishedConnection {
         let total_read = LENGTH_BYTE_SIZE + length;
         let id = read_byte(read_buffer)?;
         let length = length - 1; // subtract ID byte
-        macro_rules! dispatch_message (
-            ($($A:ident),*) => (
-                match id {
-                    Block::ID => {
-                        Block::read_and_update(read_buffer, &mut self.block_manager, length)
-                    },
-                    $($A::ID => {
-                        let (msg, length) = $A::read_from(read_buffer, length)?;
-                        assert_eq!(length, 0);
-                        msg.update(self)
-                    })*
-                    _ => Err(UpdateError::UnknownMessage{id}),
-                }
-            );
-        );
-        let retval = dispatch_message!(
-            Choke,
-            Unchoke,
-            Interested,
-            NotInterested,
-            Have,
-            Bitfield,
-            Request,
-            Cancel,
-            Port
-        );
+        let handle_block =
+            |read_buffer| Block::read_and_update(read_buffer, &mut self.block_manager, length);
+        let retval = dispatch_message(read_buffer, length, id, &mut self.peer_data, handle_block);
         self.next_message_length = None;
         *self.downloaded.borrow_mut() += total_read;
         match retval {
@@ -183,6 +155,33 @@ impl EstablishedConnection {
         self.last_keep_alive = std::time::Instant::now();
     }
 
+    // Returns true if buffer was successfully flush, false if EWOULDBLOCK.
+    fn flush_send_buffer(&mut self) -> Result<bool, std::io::Error> {
+        let mut result = false;
+        if self.send_buffer.is_empty() {
+            return Ok(result);
+        }
+        match self.stream.write(&self.send_buffer) {
+            Ok(sent) => {
+                if sent == self.send_buffer.len() {
+                    self.send_buffer.clear();
+                    result = true;
+                } else {
+                    debug!("Wrote partial buffer");
+                    self.send_buffer.drain(0..sent);
+                    return Err(std::io::ErrorKind::WouldBlock.into());
+                }
+            }
+            Err(error) => {
+                if error.kind() != std::io::ErrorKind::WouldBlock {
+                    return Err(error);
+                }
+                debug!("EWOULDBLOCK while sending on Connection {:?}", self.id);
+            }
+        }
+        Ok(result)
+    }
+
     // True: message was used
     // False: message was dropped because of TCP pushback
     // If we get pushback, we keep the remaining piece of the message that failed to send
@@ -204,55 +203,44 @@ impl EstablishedConnection {
             message.write(&mut self.send_buffer).unwrap();
             result = true;
         }
-        match self.stream.write(&self.send_buffer) {
-            Ok(sent) => {
-                if sent == self.send_buffer.len() {
-                    self.send_buffer.clear();
-                } else {
-                    debug!("Wrote partial buffer");
-                    self.send_buffer.drain(0..sent);
-                }
-            }
-            Err(error) => {
-                if error.kind() != std::io::ErrorKind::WouldBlock {
-                    return Err(error);
-                }
-                debug!("EWOULDBLOCK while sending on Connection {}", self.id);
-            }
-        }
+        self.flush_send_buffer()?;
         Ok(result)
     }
 
-    pub fn send_disk_request(&self, request: Request) {
-        self.disk_requester
-            .send(DiskRequest::Request {
-                info_hash: self.info_hash,
-                conn_id: ConnectionIdentifier::TcpToken(Token(self.id)),
-                request,
-            })
-            .unwrap();
-    }
+    // pub fn send_disk_request(&self, request: Request) {
+    //     self.disk_requester
+    //         .send(DiskRequest::Request {
+    //             info_hash: self.info_hash,
+    //             conn_id: self.id,
+    //             request,
+    //         })
+    //         .unwrap();
+    // }
 
     fn send_block_requests(&mut self) -> UpdateResult {
-        if !self.peer_choking {
-            debug!("Peer is not choking");
-            self.send_buffer.clear();
-            let sent = self.block_manager.send_block_requests(
-                &mut self.send_buffer,
-                &self.peer_has,
-                self.id,
-            )?;
-            self.stream.write_all(&self.send_buffer)?;
-            self.send_buffer.clear();
-            if sent == 0 {
-                debug!("No block requests sent");
-                return Ok(UpdateSuccess::NoUpdate);
-            }
-            return Ok(UpdateSuccess::Success);
-        } else {
+        if self.peer_data.peer_choking {
             info!("Peer is choking");
+            return Ok(UpdateSuccess::NoUpdate);
         }
-        Ok(UpdateSuccess::NoUpdate)
+
+        debug!("Peer is not choking");
+        assert!(self.send_buffer.is_empty());
+        let sent = self
+            .block_manager
+            .send_block_requests(&mut self.send_buffer, &self.peer_data.peer_has, self.id)
+            .expect("write to vec can't fail");
+        self.flush_send_buffer()?;
+        if sent == 0 {
+            debug!("No block requests sent");
+            return Ok(UpdateSuccess::NoUpdate);
+        }
+        Ok(UpdateSuccess::Success)
+    }
+
+    pub fn write_to_send_buffer<T: ProtocolMessage>(&mut self, message: T) {
+        message
+            .write(&mut self.send_buffer)
+            .expect("vec write can't fail");
     }
 }
 
@@ -271,6 +259,10 @@ impl ConnectionBase for EstablishedConnection {
                 return Err(error);
             }
         };
+        // Avoid sending more messages and dropping them if we are experiencing TCP Pushback
+        if !self.send_buffer.is_empty() && !self.flush_send_buffer()? {
+            return Ok(UpdateSuccess::NoUpdate);
+        }
 
         match self.state {
             State::Seeding => Ok(read_result),
@@ -285,7 +277,7 @@ impl ConnectionBase for EstablishedConnection {
                     self.state = State::Seeding;
                     return Ok(read_result);
                 }
-                debug!("Connection {} sending block requests", self.id);
+                debug!("Connection {:?} sending block requests", self.id);
                 let request_result = self.send_block_requests()?;
                 match (&read_result, request_result) {
                     (UpdateSuccess::NoUpdate, UpdateSuccess::NoUpdate) => {

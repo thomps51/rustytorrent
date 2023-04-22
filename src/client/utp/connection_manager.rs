@@ -5,14 +5,17 @@ use mio::net::UdpSocket;
 use write_to::ReadFrom;
 
 use crate::{
-    client::{connection_manager::TorrentData, utp::Header, UpdateError},
+    client::{
+        connection_manager::TorrentData, disk_manager::ConnectionIdentifier, utp::Header,
+        UpdateError,
+    },
     common::{Sha1Hash, PEER_ID_LENGTH},
     io::{
         recvmmsg::{PacketData, UtpReceiver},
         sendmmsg::UtpBlockSender,
         ReadBuffer,
     },
-    messages::{Bitfield, Block, Interested, Unchoke},
+    messages::{Bitfield, Block, Have, Interested, Unchoke},
     tracker::PeerInfo,
 };
 
@@ -117,7 +120,7 @@ impl UtpConnectionManager {
                         .utp_connections
                         .get_mut(&(addr, connection_id))
                         .unwrap();
-                    if let Err(error) = self.utp_send_buffer.send(
+                    if let Err(error) = self.utp_send_buffer.send_to(
                         &mut self.utp_block_sender,
                         utp_socket,
                         connection.connection_info(),
@@ -197,7 +200,7 @@ impl UtpConnectionManager {
             .peers_data
             .add_connected_id_utp(socket.conn_id_recv, handshake.peer_id, addr);
         let mut promoted = EstablishedUtpConnection::new(
-            0, // Add UTP Ids
+            ConnectionIdentifier::UtpId(addr, connection_id), // Add UTP Ids
             handshake.info_hash,
             socket,
             torrent_data.piece_info.total_pieces,
@@ -254,7 +257,7 @@ impl UtpConnectionManager {
         );
         self.utp_send_buffer.add_header(Type::StSyn);
         let connection_id = connection.socket.conn_id_recv;
-        if let Err(error) = self.utp_send_buffer.send(
+        if let Err(error) = self.utp_send_buffer.send_to(
             &mut self.utp_block_sender,
             utp_socket,
             &mut connection.socket,
@@ -293,6 +296,37 @@ impl UtpConnectionManager {
                 warn!("Error from sending UTP block: {:?}", error);
                 // "disconnect" UTP peer? Send FIN
             }
+        }
+    }
+
+    pub fn num_connections(&self) -> usize {
+        self.utp_connections.len()
+    }
+
+    pub fn send_have(
+        &mut self,
+        torrents: &mut HashMap<Sha1Hash, TorrentData>,
+        info_hash: Sha1Hash,
+        piece_index: usize,
+        socket: &UdpSocket,
+    ) {
+        if let Some(torrent) = torrents.get_mut(&info_hash) {
+            self.utp_send_buffer.add_data(Have {
+                index: piece_index as _,
+            });
+            let iter = torrent.peers_data.utp_connected.keys().filter_map(|key| {
+                let Some(conn) = self.utp_connections.get_mut(key) else {return None;};
+                let conn_info = conn.connection_info();
+                Some((
+                    key.0,
+                    conn_info.packet_size(),
+                    conn_info.create_header(Type::StData),
+                ))
+            });
+            // Do I care if this succeeds? Not really, mostly advisory data.
+            let _ = self
+                .utp_send_buffer
+                .send_to_all(&mut self.utp_block_sender, iter, socket);
         }
     }
 }

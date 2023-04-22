@@ -1,12 +1,15 @@
 use log::debug;
-use mio::{Interest, Poll, Token};
+use mio::{Poll, Token, Interest};
 use write_to::WriteTo;
 
-use crate::common::{Sha1Hash, PEER_ID_LENGTH};
-use crate::io::ReadBuffer;
-use crate::messages::*;
+use crate::{
+    client::{NetworkSource, UpdateError},
+    common::{Sha1Hash, PEER_ID_LENGTH},
+    io::ReadBuffer,
+    messages::Handshake,
+};
 
-use super::{ConnectionBase, NetworkSource, UpdateError};
+use super::ConnectionBase;
 
 pub struct HandshakingConnection {
     pub token: Token,

@@ -5,10 +5,11 @@ use std::time::Instant;
 use bit_vec::BitVec;
 use log::{debug, info};
 
+use super::disk_manager::ConnectionIdentifier;
 use super::piece_info::PieceInfo;
 use crate::messages::Request;
 
-type ConnectionId = usize;
+// type ConnectionId = usize;
 type PieceId = usize;
 type BlockId = usize;
 
@@ -19,7 +20,7 @@ pub struct PieceAssigner {
     endgame: bool,
     current_piece: Option<usize>,
     current_block: usize,
-    assigned: HashMap<ConnectionId, HashMap<PieceId, HashSet<BlockId>>>,
+    assigned: HashMap<ConnectionIdentifier, HashMap<PieceId, HashSet<BlockId>>>,
     endgame_unreceived_blocks: Vec<Request>,
     prev_unreceived_call: Instant,
 }
@@ -71,7 +72,7 @@ impl PieceAssigner {
     pub fn get_block<F: Fn() -> Vec<Request>>(
         &mut self,
         peer_has: &BitVec,
-        connection_id: usize,
+        connection_id: ConnectionIdentifier,
         unreceived: F,
     ) -> AssignedBlockResult {
         if !self.endgame_unreceived_blocks.is_empty() {
@@ -93,7 +94,7 @@ impl PieceAssigner {
             }
             if request.is_none() {
                 info!(
-                    "Connection {} has already requested all unreceived blocks once",
+                    "Connection {:?} has already requested all unreceived blocks once",
                     connection_id
                 );
                 return AssignedBlockResult::NoBlocksToAssign;

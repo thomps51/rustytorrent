@@ -14,10 +14,7 @@ use bit_vec::BitVec;
 use write_to::{Length, NormalizedIntegerAccessors, ReadFrom, WriteTo};
 
 use crate::{
-    client::{
-        piece_info::PieceInfo, BlockManager, EstablishedConnection, UpdateError, UpdateResult,
-        UpdateSuccess,
-    },
+    client::{piece_info::PieceInfo, BlockManager, UpdateResult, UpdateSuccess},
     common::BLOCK_LENGTH,
 };
 
@@ -103,6 +100,8 @@ macro_rules! impl_has_id {
         impl HasId for $NAME {
             const ID: u8 = $ID;
         }
+
+        impl ProtocolMessage for $NAME {}
     };
 }
 
@@ -129,48 +128,6 @@ macro_rules! impl_length_fixed_size {
 
 impl_length_fixed_size!(Request);
 
-macro_rules! ImplSingleByteMessage {
-    ($NAME:ident, $Flag:ident, $Value:literal) => {
-        impl ProtocolMessage for $NAME {
-            fn update(self, connection: &mut EstablishedConnection) -> UpdateResult {
-                connection.$Flag = $Value;
-                Ok(UpdateSuccess::Success)
-            }
-        }
-    };
-}
-ImplSingleByteMessage!(Choke, peer_choking, true);
-ImplSingleByteMessage!(Unchoke, peer_choking, false);
-ImplSingleByteMessage!(Interested, peer_interested, true);
-ImplSingleByteMessage!(NotInterested, peer_interested, false);
-
-impl ProtocolMessage for Have {
-    fn update(self, connection: &mut EstablishedConnection) -> UpdateResult {
-        if self.index as usize >= connection.peer_has.len() {
-            return Err(UpdateError::IndexOutOfBounds);
-        }
-        connection.peer_has.set(self.index as usize, true);
-        Ok(UpdateSuccess::Success)
-    }
-}
-
-impl ProtocolMessage for Bitfield {
-    fn update(self, connection: &mut EstablishedConnection) -> UpdateResult {
-        // Received bitfield was padded with extra bits, so we need to truncate it
-        connection.peer_has = self.bitfield;
-        connection.peer_has.truncate(connection.num_pieces);
-        Ok(UpdateSuccess::Success)
-    }
-}
-
-impl ProtocolMessage for Request {
-    fn update(self, connection: &mut EstablishedConnection) -> UpdateResult {
-        log::debug!("Updating connection with request: {:?}", self);
-        connection.send_disk_request(self);
-        Ok(UpdateSuccess::Success)
-    }
-}
-
 impl Request {
     pub fn new(block_index: usize, piece_index: usize, piece_info: PieceInfo) -> Self {
         Request {
@@ -193,12 +150,6 @@ impl Request {
 
     pub fn requested_piece_length(&self) -> usize {
         self.get_length()
-    }
-}
-
-impl ProtocolMessage for Block {
-    fn update(self, _: &mut EstablishedConnection) -> UpdateResult {
-        panic!("read_and_update used instead");
     }
 }
 
@@ -257,20 +208,6 @@ impl Block {
             length,
         );
         block_manager.add_block(BlockReader::new(reader, begin as _, index as _, length))?;
-        Ok(UpdateSuccess::Success)
-    }
-}
-
-impl ProtocolMessage for Cancel {
-    fn update(self, connection: &mut EstablishedConnection) -> UpdateResult {
-        connection.pending_peer_cancels.push(self);
-        Ok(UpdateSuccess::Success)
-    }
-}
-
-impl ProtocolMessage for Port {
-    fn update(self, _connection: &mut EstablishedConnection) -> UpdateResult {
-        // Simple ack, DHT not implemented
         Ok(UpdateSuccess::Success)
     }
 }

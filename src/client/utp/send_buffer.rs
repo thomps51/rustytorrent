@@ -1,4 +1,4 @@
-use std::io::Write;
+use std::{io::Write, net::SocketAddr};
 
 use mio::net::UdpSocket;
 use write_to::WriteTo;
@@ -30,7 +30,7 @@ impl UtpSendBuffer {
         self.header_only.push(header);
     }
 
-    pub fn send(
+    pub fn send_to(
         &mut self,
         utp_sender: &mut UtpBlockSender,
         socket: &UdpSocket,
@@ -60,6 +60,18 @@ impl UtpSendBuffer {
         let value = conn_info.seq_nr.wrapping_add((sent - 1) as u16);
         conn_info.seq_nr = value;
         Ok(())
+    }
+
+    // Send the message to all peers in the iterator
+    pub fn send_to_all(
+        &mut self,
+        utp_sender: &mut UtpBlockSender,
+        connections: impl Iterator<Item = (SocketAddr, usize, Header)>,
+        socket: &UdpSocket,
+    ) -> std::io::Result<()> {
+        let result = utp_sender.send_all(connections, &mut self.data_buffer, socket);
+        self.data_buffer.clear();
+        result
     }
 }
 

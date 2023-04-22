@@ -1,33 +1,4 @@
-use super::EstablishedConnection;
-use super::HandshakingConnection;
-use super::NetworkSource;
 use crate::common::Sha1Hash;
-use crate::io::ReadBuffer;
-
-pub enum Connection {
-    Handshaking(HandshakingConnection),
-    Established(EstablishedConnection),
-}
-
-impl Connection {
-    pub fn into_network_source(self) -> NetworkSource {
-        match self {
-            Connection::Handshaking(c) => c.into_network_source(),
-            Connection::Established(c) => c.into_network_source(),
-        }
-    }
-}
-
-pub trait ConnectionBase: Sized {
-    type UpdateSuccessType: Default;
-
-    fn update(
-        &mut self,
-        read_buffer: &mut ReadBuffer,
-    ) -> Result<Self::UpdateSuccessType, UpdateError>;
-
-    fn into_network_source(self) -> NetworkSource;
-}
 
 pub type UpdateResult = Result<UpdateSuccess, UpdateError>;
 

@@ -46,16 +46,6 @@ impl Handshake {
             peer_id,
         })
     }
-
-    // pub fn write_to<T: Write>(&self, writer: &mut T) -> Result<(), Error> {
-    //     debug!("Writing handshake");
-    //     writer.write_all(&[Self::PSTR.len() as u8])?;
-    //     writer.write_all(Self::PSTR)?;
-    //     writer.write_all(&self.reserved)?;
-    //     writer.write_all(&self.info_hash)?;
-    //     writer.write_all(&self.peer_id)?;
-    //     Ok(())
-    // }
 }
 
 impl WriteTo for Handshake {

@@ -3,8 +3,6 @@ use std::io::{Read, Result, Write};
 use log::{debug, info};
 use write_to::{Length, Name, ReadFrom, WriteTo};
 
-use crate::client::{EstablishedConnection, UpdateResult};
-
 pub trait HasId {
     const ID: u8;
 }
@@ -25,8 +23,6 @@ pub trait ProtocolMessage: Sized + Name + Length + ReadFrom + WriteTo + HasId {
         debug!("Read message of type: {}", Self::NAME);
         Ok(message)
     }
-
-    fn update(self, connection: &mut EstablishedConnection) -> UpdateResult;
 
     // Unlike ReadFrom, we don't know which particular message we have when we want
     fn write<T: Write>(&self, writer: &mut T) -> Result<()> {

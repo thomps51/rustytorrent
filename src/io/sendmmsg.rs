@@ -109,6 +109,7 @@ pub fn sendmmsg(
 pub struct UtpBlockSender {
     msghdr_xs: Vec<MsghdrX>,
     aux_data: Vec<AuxData>,
+    addrs: Vec<([u8; std::mem::size_of::<libc::sockaddr_in6>()], usize)>,
     high_watermark: usize,
 }
 
@@ -156,6 +157,7 @@ impl UtpBlockSender {
             msghdr_xs,
             aux_data,
             high_watermark: num_packets,
+            addrs: Vec::new(),
         }
     }
 
@@ -255,6 +257,8 @@ impl UtpBlockSender {
             return Err(std::io::Error::last_os_error());
         }
         if num_packets_sent as usize != num_packets {
+            // TODO: if this happens, I should retry the remaining packets either until I have sent all of the packets
+            // or I get a negative return
             return Err(std::io::ErrorKind::UnexpectedEof.into());
         }
         Ok(num_packets_sent as _)
@@ -273,5 +277,69 @@ impl UtpBlockSender {
             self.aux_data.resize(new_len, AuxData::default());
             self.high_watermark = new_len
         }
+    }
+
+    // Send the same data to multiple destinations
+    pub fn send_all(
+        &mut self,
+        connections: impl Iterator<Item = (SocketAddr, usize, Header)>,
+        data: &mut [u8],
+        socket: &UdpSocket,
+    ) -> std::io::Result<()> {
+        // assume it fits in packet for now
+        let mut num_packets = 0;
+        for (addr, _packet_size, header) in connections {
+            self.aux_data.push(Default::default());
+            let AuxData {
+                iovecs,
+                header_buffer,
+            } = self.aux_data.last_mut().unwrap();
+            header
+                .write_to(&mut header_buffer.buffer.as_mut_slice())
+                .expect("this write can't fail");
+            *iovecs = [
+                libc::iovec {
+                    iov_base: header_buffer.buffer.as_mut_ptr() as _,
+                    iov_len: Header::SIZE,
+                },
+                libc::iovec {
+                    iov_base: data.as_mut_ptr() as _,
+                    iov_len: data.len(),
+                },
+            ];
+            self.addrs.push(Default::default());
+            let (addr_buffer, addr_len) = self.addrs.last_mut().unwrap();
+            let (sockaddr_in, sockaddr_len) = socketaddr_to_raw(addr);
+            *addr_buffer = sockaddr_in;
+            *addr_len = sockaddr_len;
+
+            self.msghdr_xs.push(MsghdrX {
+                msg_iov: iovecs.as_mut_ptr() as _,
+                msg_iovlen: iovecs.len() as _,
+                msg_name: addr_buffer.as_mut_ptr() as _,
+                msg_namelen: *addr_len as _,
+                ..Default::default()
+            });
+            num_packets += 1;
+        }
+        let num_packets_sent = unsafe {
+            libc::syscall(
+                SYS_SENDMSG_X as _,
+                socket.as_raw_fd() as usize,
+                self.msghdr_xs.as_mut_ptr() as usize,
+                self.msghdr_xs.len(),
+                0,
+            )
+        };
+        if num_packets_sent < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        if num_packets_sent as usize != num_packets {
+            // TODO: if this happens, I should retry the remaining packets either until I have sent all of the packets
+            // or I get a negative return
+            return Err(std::io::ErrorKind::UnexpectedEof.into());
+        }
+
+        Ok(())
     }
 }

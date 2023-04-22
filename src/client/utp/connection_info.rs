@@ -81,4 +81,9 @@ impl UtpConnectionInfo {
         let (prev_timestamp_diff, _) = now.overflowing_sub(header.timestamp_microseconds);
         self.prev_timestamp_diff = prev_timestamp_diff;
     }
+
+    pub fn packet_size(&self) -> usize {
+        // TODO: actually implement utp to determine this
+        1000
+    }
 }
