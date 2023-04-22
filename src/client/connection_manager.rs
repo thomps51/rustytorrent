@@ -27,7 +27,6 @@ use crate::tracker::{EventKind, PeerInfoList};
 const PRINT_UPDATE_TIME: std::time::Duration = std::time::Duration::from_secs(1);
 
 pub struct ConnectionManager {
-    // shared
     downloaded: usize,
     uploaded: usize,
     last_update: std::time::Instant,
@@ -35,9 +34,7 @@ pub struct ConnectionManager {
     config: ConnectionManagerConfig,
     peer_id: [u8; PEER_ID_LENGTH],
     tracker_sender: Sender<TrackerRequest>,
-    // tcp things
     tcp_manager: TcpConnectionManager,
-    // Utp things
     utp_socket: UdpSocket,
     utp_manager: UtpConnectionManager,
 }

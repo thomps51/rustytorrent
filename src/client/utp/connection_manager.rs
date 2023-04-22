@@ -285,13 +285,17 @@ impl UtpConnectionManager {
             return
         };
         let utp_header = conn.get_utp_header();
+        let block_len = block.block.len();
         match self
             .utp_block_sender
             .send_block(utp_header, utp_socket, 1000, block, addr)
         {
             // get_utp_header will actually add 1 to seq_nr, so we subtract one here.
             // probably should change that though.
-            Ok(sent) => conn.add_seq_nr(sent - 1),
+            Ok(sent) => {
+                conn.add_seq_nr(sent - 1);
+                *conn.uploaded.borrow_mut() += block_len;
+            }
             Err(error) => {
                 warn!("Error from sending UTP block: {:?}", error);
                 // "disconnect" UTP peer? Send FIN

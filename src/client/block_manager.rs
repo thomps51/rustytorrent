@@ -40,7 +40,6 @@ pub struct BlockManager {
     pub piece_assigner: SharedPieceAssigner,
     endgame_sent_blocks: HashMap<usize, BitVec>,
     pub block_cache: SharedBlockCache,
-    // write_buffer: Vec<u8>,
 }
 
 impl BlockManager {
@@ -50,7 +49,6 @@ impl BlockManager {
             piece_assigner,
             endgame_sent_blocks: HashMap::new(),
             block_cache,
-            // write_buffer: vec![],
         }
     }
     pub fn add_block<T: Read>(&mut self, data: BlockReader<T>) -> Result<(), std::io::Error> {

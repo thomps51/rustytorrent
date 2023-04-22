@@ -19,16 +19,13 @@ use write_to::ReadFrom;
 use super::{Header, Type, UtpConnectionInfo, UtpSendBuffer};
 
 pub struct EstablishedUtpConnection {
-    pub info_hash: Sha1Hash,
-    pub am_choking: bool,
-    pub am_interested: bool,
-    pub id: ConnectionIdentifier,
+    id: ConnectionIdentifier,
     peer_data: PeerData,
     pub(crate) stream: UtpConnectionInfo,
     last_keep_alive: std::time::Instant,
     block_manager: BlockManager,
     state: State,
-    pub downloaded: SharedCount,
+    downloaded: SharedCount,
     pub uploaded: SharedCount,
     current_block: BlockInFlight,
     next_sequence_number: u16,
@@ -138,9 +135,6 @@ impl EstablishedUtpConnection {
     ) -> Self {
         let next_sequence_number = stream.ack_nr;
         Self {
-            info_hash,
-            am_choking: true,
-            am_interested: false,
             id,
             peer_data: PeerData::new(id, disk_requester, info_hash, num_pieces),
             stream,

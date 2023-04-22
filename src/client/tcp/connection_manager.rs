@@ -16,7 +16,7 @@ use crate::{
     },
     common::{Sha1Hash, PEER_ID_LENGTH},
     io::ReadBuffer,
-    messages::{Bitfield, Block, Handshake, Have, Interested, Unchoke},
+    messages::{Bitfield, Block, Handshake, Interested, Unchoke},
     tracker::PeerInfo,
 };
 
@@ -227,7 +227,7 @@ impl TcpConnectionManager {
     ) {
         let Some(Connection::Established(connection)) =
             self.connections.get_mut(&token) else {return};
-        let Err(error) = connection.send(&block) else {return};
+        let Err(error) = connection.send_block(&block) else {return};
         self.disconnect_peer(torrents, token, error.into());
     }
 
@@ -246,12 +246,7 @@ impl TcpConnectionManager {
             torrent.have_on_disk.set(piece_index, true);
             for token in torrent.peers_data.token_to_info.keys() {
                 if let Some(Connection::Established(peer)) = self.connections.get_mut(token) {
-                    if peer.peer_data.peer_has[piece_index] {
-                        continue;
-                    }
-                    peer.write_to_send_buffer(Have {
-                        index: piece_index as u32,
-                    });
+                    peer.send_have(piece_index);
                 }
             }
         }

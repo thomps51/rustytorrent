@@ -49,7 +49,6 @@ impl OutgoingUtpConnection {
         debug!("update of state: {:?}", self.state);
         match self.state {
             OutgoingUtpState::CsSynSent => {
-                // TODO: Split these into Incoming/Outgoing classes?
                 // Sent initiating packet, wait until we recv ST_STATE packet
                 if header.get_type() != Type::StState {
                     if header.get_type() == Type::StSyn {
@@ -104,7 +103,6 @@ impl OutgoingUtpConnection {
                 // I will likely receive an ACK before the handshake
                 let handshake_from_peer = Handshake::read_from(read_buffer)?;
                 // may have more than just handshake data, including have info, unchoke, etc
-                // debug!("Got handshake from peer {}", self.token.0);
                 debug!("Outgoing utp got handshake from peer");
                 Ok(HandshakingUpdateSuccess::Complete(handshake_from_peer))
             }

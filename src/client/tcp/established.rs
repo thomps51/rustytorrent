@@ -17,22 +17,17 @@ use crate::messages::ProtocolMessage;
 use write_to::ReadFrom;
 
 pub struct EstablishedConnection {
-    pub info_hash: Sha1Hash,
-    pub am_choking: bool,
-    pub am_interested: bool,
-    pub id: ConnectionIdentifier,
+    id: ConnectionIdentifier,
     stream: NetworkSource,
     last_keep_alive: std::time::Instant,
     block_manager: BlockManager,
-    pub pending_peer_cancels: Vec<Cancel>,
     next_message_length: Option<usize>,
     incomplete_message_buffer: Vec<u8>,
     send_buffer: Vec<u8>,
-    pub num_pieces: usize,
     state: State,
-    pub downloaded: SharedCount,
-    pub uploaded: SharedCount,
-    pub peer_data: PeerData,
+    downloaded: SharedCount,
+    uploaded: SharedCount,
+    peer_data: PeerData,
 }
 
 pub enum State {
@@ -54,18 +49,13 @@ impl EstablishedConnection {
         uploaded: SharedCount,
     ) -> Self {
         Self {
-            info_hash,
-            am_choking: true,
-            am_interested: false,
             id,
             stream,
             last_keep_alive: std::time::Instant::now(),
             block_manager: BlockManager::new(piece_assigner, block_cache),
-            pending_peer_cancels: Vec::new(),
             next_message_length: None,
             incomplete_message_buffer: Vec::new(),
             send_buffer: Vec::new(),
-            num_pieces,
             state: State::ConnectedNormal,
             downloaded,
             uploaded,
@@ -207,16 +197,6 @@ impl EstablishedConnection {
         Ok(result)
     }
 
-    // pub fn send_disk_request(&self, request: Request) {
-    //     self.disk_requester
-    //         .send(DiskRequest::Request {
-    //             info_hash: self.info_hash,
-    //             conn_id: self.id,
-    //             request,
-    //         })
-    //         .unwrap();
-    // }
-
     fn send_block_requests(&mut self) -> UpdateResult {
         if self.peer_data.peer_choking {
             info!("Peer is choking");
@@ -237,10 +217,21 @@ impl EstablishedConnection {
         Ok(UpdateSuccess::Success)
     }
 
-    pub fn write_to_send_buffer<T: ProtocolMessage>(&mut self, message: T) {
-        message
-            .write(&mut self.send_buffer)
-            .expect("vec write can't fail");
+    pub fn send_have(&mut self, piece_index: usize) {
+        if self.peer_data.peer_has[piece_index] {
+            return;
+        }
+        Have {
+            index: piece_index as u32,
+        }
+        .write(&mut self.send_buffer)
+        .expect("vec write can't fail");
+    }
+
+    pub fn send_block(&mut self, block: &Block) -> std::io::Result<()> {
+        self.send(block)?;
+        *self.uploaded.borrow_mut() += block.block.len();
+        Ok(())
     }
 }
 

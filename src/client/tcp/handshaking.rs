@@ -1,5 +1,5 @@
 use log::debug;
-use mio::{Poll, Token, Interest};
+use mio::{Interest, Poll, Token};
 use write_to::WriteTo;
 
 use crate::{
@@ -12,10 +12,10 @@ use crate::{
 use super::ConnectionBase;
 
 pub struct HandshakingConnection {
-    pub token: Token,
+    token: Token,
     stream: NetworkSource,
     read_buffer: ReadBuffer,
-    pub state: HandshakingState,
+    state: HandshakingState,
     conn_type: Type,
     peer_id: [u8; PEER_ID_LENGTH],
 }
