@@ -25,7 +25,7 @@ pub type AllocatedFiles = HashMap<PathBuf, fs::File>;
 
 #[derive(Debug, Clone, Copy, Eq, Hash, PartialEq)]
 pub enum ConnectionIdentifier {
-    TcpToken(Token),
+    TcpToken(Token, usize),
     UtpId(SocketAddr, u16),
 }
 

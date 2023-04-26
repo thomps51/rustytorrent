@@ -9,6 +9,7 @@ pub mod established;
 pub mod handshaking;
 
 pub enum Connection {
+    Empty,
     Handshaking(HandshakingConnection),
     Established(EstablishedConnection),
 }
@@ -18,7 +19,16 @@ impl Connection {
         match self {
             Connection::Handshaking(c) => c.into_network_source(),
             Connection::Established(c) => c.into_network_source(),
+            Connection::Empty => panic!("not implemented for empty socket"),
         }
+    }
+
+    pub fn reset(&mut self) {
+        *self = Connection::Empty;
+    }
+
+    pub fn take(&mut self) -> Connection {
+        std::mem::replace(self, Connection::Empty)
     }
 }
 

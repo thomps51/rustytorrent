@@ -63,6 +63,14 @@ impl EstablishedConnection {
         }
     }
 
+    pub fn info_hash(&self) -> Sha1Hash {
+        self.peer_data.info_hash
+    }
+
+    pub fn id(&self) -> ConnectionIdentifier {
+        self.id
+    }
+
     fn read(&mut self, read_buffer: &mut ReadBuffer) -> UpdateResult {
         const LENGTH_BYTE_SIZE: usize = 4;
         if !self.incomplete_message_buffer.is_empty() {

@@ -3,7 +3,7 @@ use mio::{Interest, Poll, Token};
 use write_to::WriteTo;
 
 use crate::{
-    client::{NetworkSource, UpdateError},
+    client::{disk_manager::ConnectionIdentifier, NetworkSource, UpdateError},
     common::{Sha1Hash, PEER_ID_LENGTH},
     io::ReadBuffer,
     messages::Handshake,
@@ -12,7 +12,7 @@ use crate::{
 use super::ConnectionBase;
 
 pub struct HandshakingConnection {
-    token: Token,
+    id: ConnectionIdentifier,
     stream: NetworkSource,
     read_buffer: ReadBuffer,
     state: HandshakingState,
@@ -53,7 +53,7 @@ impl ConnectionBase for HandshakingConnection {
     ) -> Result<Self::UpdateSuccessType, UpdateError> {
         match self.state {
             HandshakingState::Connecting { info_hash } => {
-                debug!("Connections for connection {}", self.token.0);
+                debug!("Connections for connection {:?}", self.id);
                 // Assumes update has been called because Poll indicated that this socket is now
                 // connected, or that connection has failed
                 use crate::messages;
@@ -72,7 +72,7 @@ impl ConnectionBase for HandshakingConnection {
                     return Ok(HandshakeUpdateSuccess::NoUpdate);
                 }
                 let handshake_from_peer = Handshake::read_from(&mut self.read_buffer)?;
-                debug!("Got handshake from peer {}", self.token.0);
+                debug!("Got handshake from peer {:?}", self.id);
                 if let Type::Incoming = self.conn_type {
                     let handshake_to_peer =
                         Handshake::new(self.peer_id, &handshake_from_peer.info_hash);
@@ -89,12 +89,12 @@ impl ConnectionBase for HandshakingConnection {
 impl HandshakingConnection {
     pub fn new_from_incoming(
         stream: NetworkSource,
-        token: Token,
+        id: ConnectionIdentifier,
         peer_id: [u8; PEER_ID_LENGTH],
     ) -> Self {
         debug!("New incoming connection from {:?}", stream.peer_addr());
         Self {
-            token,
+            id,
             stream,
             read_buffer: ReadBuffer::new(Handshake::SIZE as usize),
             state: HandshakingState::Reading,
@@ -106,17 +106,21 @@ impl HandshakingConnection {
     pub fn new_from_outgoing(
         stream: NetworkSource,
         info_hash: Sha1Hash,
-        token: Token,
+        id: ConnectionIdentifier,
         peer_id: [u8; PEER_ID_LENGTH],
     ) -> Self {
         Self {
-            token,
+            id,
             stream,
             read_buffer: ReadBuffer::new(Handshake::SIZE as usize),
             state: HandshakingState::Connecting { info_hash },
             conn_type: Type::Outgoing,
             peer_id,
         }
+    }
+
+    pub fn into_source_id(self) -> (NetworkSource, ConnectionIdentifier) {
+        (self.stream, self.id)
     }
 
     pub fn register(&mut self, poll: &mut Poll, token: Token, interests: Interest) {

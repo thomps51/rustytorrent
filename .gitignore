@@ -1,3 +1,9 @@
 /target
 Cargo.lock
 .DS_Store
+/Launch_torrent_*/*
+*.dmg
+*.txt
+*.iso
+*.pcapng
+*.out

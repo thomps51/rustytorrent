@@ -205,11 +205,12 @@ impl Controller {
                     );
                 }
                 DiskResponse::RequestCompleted {
-                    info_hash: _,
+                    info_hash,
                     conn_id,
                     block,
                 } => {
-                    self.connection_manager.send_block(conn_id, block);
+                    self.connection_manager
+                        .send_block(info_hash, conn_id, block);
                 }
                 DiskResponse::WritePieceCompleted {
                     info_hash,

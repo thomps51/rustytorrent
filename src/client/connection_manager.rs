@@ -246,11 +246,11 @@ impl ConnectionManager {
             .send_have(&mut self.torrents, info_hash, piece_index, &self.utp_socket)
     }
 
-    pub fn send_block(&mut self, conn_id: ConnectionIdentifier, block: Block) {
+    pub fn send_block(&mut self, info_hash: Sha1Hash, conn_id: ConnectionIdentifier, block: Block) {
         match conn_id {
-            ConnectionIdentifier::TcpToken(token) => {
-                self.tcp_manager
-                    .send_block(&mut self.torrents, block, token);
+            ConnectionIdentifier::TcpToken(token, id) => {
+                let Some(torrent) = self.torrents.get_mut(&info_hash) else {return};
+                self.tcp_manager.send_block(torrent, block, token, id);
             }
             ConnectionIdentifier::UtpId(addr, conn_id) => {
                 self.utp_manager

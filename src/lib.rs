@@ -5,7 +5,9 @@
 #![feature(read_buf)]
 #![feature(int_roundings)]
 #![allow(clippy::new_without_default)]
+#![allow(clippy::too_many_arguments)]
 #![feature(anonymous_lifetime_in_impl_trait)]
+#![feature(duration_constants)]
 pub mod bencoding;
 // pub use bencoding::*;
 
