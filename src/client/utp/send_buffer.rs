@@ -1,5 +1,6 @@
 use std::{io::Write, net::SocketAddr};
 
+use log::debug;
 use mio::net::UdpSocket;
 use write_to::WriteTo;
 
@@ -36,18 +37,21 @@ impl UtpSendBuffer {
         socket: &UdpSocket,
         conn_info: &mut UtpConnectionInfo,
     ) -> std::io::Result<()> {
+        let addr = conn_info.addr();
         for header_type in self.header_only.drain(..) {
             let header = conn_info.create_header(header_type);
             header
                 .write_to(&mut self.header_buffer.as_mut_slice())
                 .unwrap();
-            socket.send_to(&self.header_buffer, conn_info.addr())?;
+            debug!("Sending header to {:?}: {:?}", addr, header);
+            socket.send_to(&self.header_buffer, addr)?;
         }
         if self.data_buffer.is_empty() {
             return Ok(());
         }
         let header = conn_info.create_header(Type::StData);
         // TODO: get packet size from conn_info
+        debug!("Sending to {:?}: length: {}", addr, self.data_buffer.len());
         let sent = utp_sender.send(
             header,
             socket,
