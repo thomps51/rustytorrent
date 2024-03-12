@@ -90,7 +90,6 @@ fn dispatch_message<'a, F: FnOnce(&'a mut ReadBuffer) -> UpdateResult>(
     peer_data: &mut PeerData,
     handle_block: F,
 ) -> UpdateResult {
-    // Block is handed elsewhere since it differs between tcp/utp
     macro_rules! dispatch_message2 (
             ($($A:ident => [$msg:ident] $B:block),*) => (
                 match id {
@@ -99,9 +98,9 @@ fn dispatch_message<'a, F: FnOnce(&'a mut ReadBuffer) -> UpdateResult>(
                     }
                     $($A::ID => {
                         debug!("Reading {} message", $A::NAME);
-                        let ($msg, length) = $A::read_from(read_buffer, length)?;/* .context("Reading message")?; */
+                        let ($msg, _length) = $A::read_from(read_buffer, length)?;/* .context("Reading message")?; */
                         debug!("Received {:?}", $msg);
-                        assert_eq!(length, 0); // Not necessarily true in UTP? Only seems to happen with Blocks?
+                        // assert_eq!(length, 0); // Not necessarily true in UTP? Only seems to happen with Blocks?
                         $B;
                         Ok(UpdateSuccess::Success)
                     })*
