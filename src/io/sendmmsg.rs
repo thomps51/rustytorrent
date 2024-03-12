@@ -1,6 +1,7 @@
 use std::net::SocketAddr;
 use std::os::fd::AsRawFd;
 
+use log::debug;
 use mio::net::UdpSocket;
 use write_to::WriteTo;
 
@@ -224,7 +225,6 @@ impl UtpBlockSender {
             utp_header
                 .write_to(&mut (*header_buffer).as_mut_slice())
                 .unwrap();
-            utp_header.seq_nr += 1;
             // Either send the max size we can fit into packet_size or the remaining data.
             let block_len_sent =
                 std::cmp::min(packet_size - *header_len, data.len() - current_index);
@@ -238,11 +238,20 @@ impl UtpBlockSender {
                     iov_len: block_len_sent,
                 },
             ];
+            debug!("utp_header: {:?}", utp_header);
+            debug!(
+                "block_len_sent: {}, current_index: {}, raw header: {:?}, raw data: {:?}",
+                block_len_sent,
+                current_index,
+                &header_buffer[0..*header_len],
+                &data[current_index..current_index + block_len_sent]
+            );
             c_struct.msg_iov = iovecs.as_mut_ptr() as _;
             c_struct.msg_iovlen = iovecs.len() as _;
             c_struct.msg_name = sockaddr_in.as_mut_ptr() as _;
             c_struct.msg_namelen = sockaddr_len as _;
             current_index += block_len_sent;
+            utp_header.seq_nr += 1;
         }
         let num_packets_sent = unsafe {
             libc::syscall(
