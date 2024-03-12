@@ -4,6 +4,7 @@ use std::{
 };
 
 use super::{Header, Type};
+use log::debug;
 use rand::Rng;
 
 #[derive(Debug)]
@@ -25,7 +26,7 @@ impl UtpConnectionInfo {
             conn_id_recv,
             conn_id_send: conn_id_recv + 1,
             ack_nr: 0,
-            wnd_size: 10000, // TODO: No idea what this should be
+            wnd_size: 1000000, // TODO: No idea what this should be
             prev_timestamp_diff: 0,
             addr,
         }
@@ -41,7 +42,7 @@ impl UtpConnectionInfo {
             conn_id_recv: header.connection_id + 1,
             conn_id_send: header.connection_id, // TODO: Why is this not +1?  It seems to want me to send back to the same id
             ack_nr: 0,
-            wnd_size: 10000, // TODO: No idea what this should be
+            wnd_size: 1000000, // TODO: No idea what this should be
             prev_timestamp_diff: 0,
             addr,
         }
@@ -55,6 +56,7 @@ impl UtpConnectionInfo {
         } else {
             self.conn_id_send
         };
+        debug!("creating header with seq_nr: {}", self.seq_nr);
         let msg = Header::new(
             header_type,
             conn_id,
