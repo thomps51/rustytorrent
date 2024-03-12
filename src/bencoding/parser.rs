@@ -171,9 +171,12 @@ pub fn parse_into_dictionary(
     torrent_file: &Path,
 ) -> Result<Dictionary, Box<dyn std::error::Error>> {
     let mut file = std::fs::File::open(torrent_file)?;
-    let mut buffer = Vec::new();
-    // TODO: don't load the file all into a buffer.  I once accidentally opened a iso as a torrent and it spun here for a while.
-    // at least maybe constrain to .torrent files
+    let mut buffer = vec![0];
+    // Read the first charactor just in case we open a super large file that isn't a torrent file.
+    file.read_exact(&mut buffer[0..1])?;
+    if buffer[0] as char != 'd' {
+        return Err(String::from("Torrent file needs to be a bencoded dictionary").into());
+    }
     file.read_to_end(&mut buffer)?;
     let result = parse(&buffer).unwrap();
     if let DataKind::Dictionary(value) = result {
